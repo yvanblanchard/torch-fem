@@ -1,5 +1,13 @@
 # Changelog 
 
+## Unreleased
+
+### Added
+- `Ply` defines a ply with a global identifier on a boolean element set, and `Laminate.from_plies(...)` stacks plies into a laminate with local plies. `Laminate.ply_ids` holds the ply identifier of each layer.
+
+### Fixed
+- A `Laminate` whose layer materials are all vectorized, e.g. with properties per element, builds its stations instead of failing in `Shell`.
+
 ## Version 0.13.0 - September 30 2026
 
 ### Added
