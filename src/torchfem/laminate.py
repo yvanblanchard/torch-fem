@@ -100,8 +100,9 @@ class Laminate:
         # Number of through-thickness integration stations
         self.n_z = self.n_layers * n_simpson
 
-        # The laminate is considered vectorized once all layer materials are.
-        self.is_vectorized = all(m.is_vectorized for m in self.materials)
+        # Stations and section stiffness are built by `vectorize`, even for layers
+        # that already carry element-wise properties.
+        self.is_vectorized = False
 
         # State width is the per-layer maximum; each layer's `step` touches only
         # the slots it needs, so mixing elastic and state-bearing layers is free.
