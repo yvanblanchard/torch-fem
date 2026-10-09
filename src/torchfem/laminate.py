@@ -72,8 +72,9 @@ class Laminate:
         # Number of through-thickness integration stations
         self.n_z = self.n_layers * n_simpson
 
-        # The laminate is considered vectorized once all layer materials are.
-        self.is_vectorized = all(m.is_vectorized for m in self.materials)
+        # The laminate is vectorized (stations and ABD built) by `vectorize`,
+        # even when its layer materials already carry element-wise properties.
+        self.is_vectorized = False
 
         # Only elastic layers (n_state == 0) are supported for now; we still
         # expose the maximum so future state-bearing layers slot in cleanly.
@@ -121,7 +122,9 @@ class Laminate:
         new.materials = []
         new.thicknesses = []
         for mat, ang, t in zip(self.materials, self.angles, self.thicknesses):
-            m = copy.deepcopy(mat).vectorize(n_elem)
+            m = copy.deepcopy(mat)
+            if not m.is_vectorized:
+                m = m.vectorize(n_elem)
             m = m.rotate(planar_rotation(ang))
             new.materials.append(m)
             new.thicknesses.append(t.expand(n_elem) if t.dim() == 0 else t)
@@ -209,8 +212,8 @@ class Laminate:
             Gs = torch.zeros(n_elem, 2, 2)
             Gs[:, 0, 0] = g13
             Gs[:, 1, 1] = g23
-            R = planar_rotation(self.angles[k])
-            Gs_rot = torch.einsum("mi,eij,nj->emn", R, Gs, R)
+            R = planar_rotation(self.angles[k]).expand(n_elem, 2, 2)
+            Gs_rot = torch.einsum("emi,eij,enj->emn", R, Gs, R)
             As = As + Gs_rot * t[k][:, None, None]
         return As
 
