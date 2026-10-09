@@ -1,0 +1,61 @@
+{
+  "hardware": "Apple M1 Pro",
+  "device": "cpu",
+  "python": "3.10.13",
+  "libraries": "SciPy 1.15.3, PyTorch 2.14.0",
+  "dtype": "float64",
+  "commit": "48f4b58",
+  "problem": "structural_cantilever_simp",
+  "rows": [
+    {
+      "N": 20,
+      "dofs": 54243,
+      "setup_s": 0.0644,
+      "fwd_s": 2.0849,
+      "bwd_s": 1.1683,
+      "peak_ram_mb": 1142.4,
+      "peak_vram_mb": null,
+      "solver": "cg | iterative | amg | scipy | cpu"
+    },
+    {
+      "N": 30,
+      "dofs": 175863,
+      "setup_s": 0.2044,
+      "fwd_s": 7.2934,
+      "bwd_s": 3.4504,
+      "peak_ram_mb": 2381.0,
+      "peak_vram_mb": null,
+      "solver": "cg | iterative | amg | scipy | cpu"
+    },
+    {
+      "N": 40,
+      "dofs": 408483,
+      "setup_s": 0.4805,
+      "fwd_s": 16.7706,
+      "bwd_s": 8.2184,
+      "peak_ram_mb": 4776.6,
+      "peak_vram_mb": null,
+      "solver": "cg | iterative | amg | scipy | cpu"
+    },
+    {
+      "N": 50,
+      "dofs": 788103,
+      "setup_s": 0.9297,
+      "fwd_s": 33.2062,
+      "bwd_s": 16.0035,
+      "peak_ram_mb": 8366.0,
+      "peak_vram_mb": null,
+      "solver": "cg | iterative | amg | scipy | cpu"
+    },
+    {
+      "N": 60,
+      "dofs": 1350723,
+      "setup_s": 1.6117,
+      "fwd_s": 59.8847,
+      "bwd_s": 28.9203,
+      "peak_ram_mb": 8881.6,
+      "peak_vram_mb": null,
+      "solver": "cg | iterative | amg | scipy | cpu"
+    }
+  ]
+}

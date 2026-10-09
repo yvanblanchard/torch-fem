@@ -4,45 +4,89 @@ icon: lucide/gauge
 
 # Performance
 
-This page documents the scaling behavior of *torch-fem* on a canonical benchmark problem and shows how to reproduce the results on your own hardware.
+Scaling behavior of *torch-fem* on four benchmark problems across several machines. The plotted time is the total of three phases, each of which is recorded separately in the [result files](https://github.com/meyer-nils/torch-fem/tree/main/benchmarks/results):
 
-## Benchmark problem
+1. **Setup:** mostly computing the sparsity pattern.
 
-A unit cube is subjected to one-dimensional extension:
+2. **Forward solve:** assembly and sparse linear solve.
 
-- Discretised with $N \times N \times N$ linear hexahedral (Hexa1) elements ($3N^3$ degrees of freedom).
-- Material: isotropic linear elasticity, $E = 1000$, $\nu = 0.3$.
-- Boundary conditions: fully clamped at $x = 0$; prescribed displacement $u_x = 0.1$ at $x = 1$.
-- Three timings are measured per run:
-    - **Setup** — mostly computing the sparsity pattern. 
-    - **Forward solve** — assembly and sparse linear system solve.
-    - **Backward solve** — reverse-mode AD of `u.sum()` w.r.t. nodal forces via `autograd`.
-- Peak RAM is tracked by polling the child-process RSS every 50 ms.
+3. **Backward pass:** reverse-mode AD through the solve via `autograd`.
 
-## Results
+## Cube extension
 
-![Solve time scaling (forward)](images/benchmark_timing.png)
+<figure markdown="span">
+![Cube extension, displacement magnitude](images/benchmark/cube_model_light.png#only-light){ width="420" }
+![Cube extension, displacement magnitude](images/benchmark/cube_model_dark.png#only-dark){ width="420" }
+</figure>
 
-![Solve time scaling (backward)](images/benchmark_backward.png)
+A unit cube from linear hexahedra with $N$ nodes along each edge ($3N^3$ degrees of freedom) in isotropic linear elasticity ($E = 1000$, $\nu = 0.3$), clamped at $x = 0$ and pulled to $u_x = 0.1$ at $x = 1$. The backward pass takes the gradient of `u.sum()` with respect to the nodal forces.
 
-![Peak RAM scaling](images/benchmark_ram.png)
+![Total time scaling](images/benchmark/cube_timing_light.png#only-light)
+![Total time scaling](images/benchmark/cube_timing_dark.png#only-dark)
 
+![Peak RAM scaling](images/benchmark/cube_ram_light.png#only-light)
+![Peak RAM scaling](images/benchmark/cube_ram_dark.png#only-dark)
+
+## Thermal SIMP slab
+
+<figure markdown="span">
+![Heated slab, temperature field](images/benchmark/thermal_model_light.png#only-light){ width="420" }
+![Heated slab, temperature field](images/benchmark/thermal_model_dark.png#only-dark){ width="420" }
+</figure>
+
+A quasi-2D slab on $[0,2] \times [0,1]$, one layer of cubic hexahedra deep and $N$ elements along the long edge, carrying SIMP-penalized conductivity $k(\rho) = k_\text{min} + (k_\text{max} - k_\text{min})\rho^3$ at uniform $\rho = 0.5$. It is cold at $x = 0$ and heated by a uniform flux at $x = 2$; the backward pass is the adjoint sensitivity of the thermal compliance with respect to the per-element densities. This mirrors the *thermal-mesh* problem of the [mosaic benchmark suite](https://github.com/pasteurlabs/mosaic).
+
+![Total time scaling](images/benchmark/thermal_timing_light.png#only-light)
+![Total time scaling](images/benchmark/thermal_timing_dark.png#only-dark)
+
+![Peak RAM scaling](images/benchmark/thermal_ram_light.png#only-light)
+![Peak RAM scaling](images/benchmark/thermal_ram_dark.png#only-dark)
+
+## SIMP cantilever
+
+<figure markdown="span">
+![SIMP cantilever, density field on the deflected beam](images/benchmark/topopt_model_light.png#only-light){ width="420" }
+![SIMP cantilever, density field on the deflected beam](images/benchmark/topopt_model_dark.png#only-dark){ width="420" }
+</figure>
+
+A cantilever on $[0,2] \times [0,1] \times [0,1]$ of $2N \times N \times N$ cubic hexahedra, carrying SIMP-penalized stiffness $E(\rho) = E_\text{min} + (E_\text{max} - E_\text{min})\rho^3$ at $E_\text{max} = 70{,}000$. It is clamped at $x = 0$ and pulled down by a uniform traction at $x = 2$; the backward pass is the adjoint sensitivity of the compliance $C = \mathbf{F}^\top \mathbf{u}$ with respect to the per-element densities. Those are random, $\rho \sim \mathcal{N}(0.5, 0.3)$ clipped to $[0.05, 0.95]$, which spreads element stiffness over a factor of 762 and roughly doubles the iteration count of the preconditioned solver. This mirrors the *structural-mesh* problem of the [mosaic benchmark suite](https://github.com/pasteurlabs/mosaic) and reproduces its published compliances to a relative error of $10^{-7}$.
+
+![Total time scaling](images/benchmark/topopt_timing_light.png#only-light)
+![Total time scaling](images/benchmark/topopt_timing_dark.png#only-dark)
+
+![Peak RAM scaling](images/benchmark/topopt_ram_light.png#only-light)
+![Peak RAM scaling](images/benchmark/topopt_ram_dark.png#only-dark)
+
+## Neo-Hookean stretch
+
+<figure markdown="span">
+![Neo-Hookean stretch, displacement magnitude at a 2x stretch](images/benchmark/hyperelasticity_model_light.png#only-light){ width="420" }
+![Neo-Hookean stretch, displacement magnitude at a 2x stretch](images/benchmark/hyperelasticity_model_dark.png#only-dark){ width="420" }
+</figure>
+
+A box of Neo-Hookean material stretched to ten times its length in 10 increments, geometric in the stretch, with full Newton iterations, mirroring the [large stretch example](https://github.com/meyer-nils/torch-fem/blob/main/examples/basic/solid/large_stretch.ipynb). Only $y$ and $z$ are refined, with $N$ nodes each over four cubic elements along the stretch direction ($15N^2$ degrees of freedom), since the solution is homogeneous and a longer stretch drives the tangent indefinite. The forward solution matches the analytical uniaxial response; the backward pass is the adjoint of the total reaction force with respect to the Lamé parameters, as used in material calibration.
+
+![Total time scaling](images/benchmark/hyperelasticity_timing_light.png#only-light)
+![Total time scaling](images/benchmark/hyperelasticity_timing_dark.png#only-dark)
+
+![Peak RAM scaling](images/benchmark/hyperelasticity_ram_light.png#only-light)
+![Peak RAM scaling](images/benchmark/hyperelasticity_ram_dark.png#only-dark)
 
 ## Reproducing the results
 
-The scripts live in `benchmarks/` at the repository root. For interactive memory profiling and cProfile / torch.profiler analysis, see the notebook at `benchmarks/cubes.ipynb`.
+The scripts live in `benchmarks/` at the repository root.
 
 **1. Run the benchmark**:
 
 ```bash
-# CPU (default)
+# All benchmarks on CPU (default)
 python benchmarks/run.py
 
-# CUDA
-python benchmarks/run.py -device cuda --label rtx5090_cuda --hardware "RTX 5090"
+# Just the cube benchmark on CUDA
+python benchmarks/run.py -problem cube -device cuda --label rtx5090_cuda --hardware "RTX 5090"
 ```
 
-Results are written to `benchmarks/results/<label>.json`.
+The label identifies the machine; results are written to `benchmarks/results/<problem>_<label>.json`.
 
 **2. Regenerate the plots**:
 
@@ -50,5 +94,7 @@ Results are written to `benchmarks/results/<label>.json`.
 python benchmarks/plot.py
 ```
 
-This reads all JSON files in `benchmarks/results/` and writes `docs/images/benchmark_timing.png`, `docs/images/benchmark_backward.png`, and `docs/images/benchmark_ram.png`.
+This reads all JSON files in `benchmarks/results/`, groups them by problem, and writes the timing and RAM plots to `docs/images/benchmark/<problem>_*.png`. 
 
+!!! info "Acknowledgement: NVIDIA A100 80GB on LiCCA"
+    The authors gratefully acknowledge the resources on the LiCCA HPC cluster of the University of Augsburg, co-funded by the Deutsche Forschungsgemeinschaft (DFG, German Research Foundation) – Project-ID 499211671.

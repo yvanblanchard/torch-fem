@@ -43,15 +43,21 @@ def test_aridhi_closed_form_in_bisector_frame():
 
 @pytest.mark.parametrize(
     "woven",
-    [WOVEN, WovenPly(70000.0, 50000.0, 0.06, 4500.0, 3000.0, 3000.0, 0.25,
-                     warp_fraction=0.6)],
+    [
+        WOVEN,
+        WovenPly(
+            70000.0, 50000.0, 0.06, 4500.0, 3000.0, 3000.0, 0.25, warp_fraction=0.6
+        ),
+    ],
 )
 def test_from_woven_recovers_unsheared_properties(woven):
     ply = BiaxialPly.from_woven(woven)
     th = torch.tensor([0.3])
     Q = stiffness2voigt(ply.stiffness(th, th + math.pi / 2))[0]
     # rotate back to the warp frame by evaluating at theta = 0
-    Q0 = stiffness2voigt(ply.stiffness(torch.zeros(1), torch.full((1,), math.pi / 2)))[0]
+    Q0 = stiffness2voigt(ply.stiffness(torch.zeros(1), torch.full((1,), math.pi / 2)))[
+        0
+    ]
     S = torch.linalg.inv(Q0)
     assert 1 / S[0, 0] == pytest.approx(woven.E_1)
     assert 1 / S[1, 1] == pytest.approx(woven.E_2)
@@ -85,7 +91,14 @@ def test_superposed_and_dual_ud_subplies_same_membrane(ply):
     A = []
     for rep in ("superposed", "subplies"):
         lam, _ = build_draped_laminate([DrapedPly(ply, t1, t2)], representation=rep)
-        A.append(Shell(nodes, elements, lam).material.abd[0])
+        sec = Shell(nodes, elements, lam).section
+        assert sec is not None
+        A.append(
+            sum(
+                stiffness2voigt(m.C) * t[:, None, None]  # type: ignore[attr-defined]
+                for m, t in zip(sec.materials, sec.thicknesses)
+            )
+        )
     assert torch.allclose(A[0], A[1], rtol=1e-10)
 
 
@@ -95,8 +108,12 @@ def test_fe_tension_along_bisector_matches_clt():
     n = len(elements)
     gamma = math.radians(40.0)
     a = math.pi / 4 - gamma / 2
-    t1 = direction_angles(nodes, elements, torch.tensor([math.cos(a), -math.sin(a), 0.0]).expand(n, 3))
-    t2 = direction_angles(nodes, elements, torch.tensor([math.cos(a), math.sin(a), 0.0]).expand(n, 3))
+    t1 = direction_angles(
+        nodes, elements, torch.tensor([math.cos(a), -math.sin(a), 0.0]).expand(n, 3)
+    )
+    t2 = direction_angles(
+        nodes, elements, torch.tensor([math.cos(a), math.sin(a), 0.0]).expand(n, 3)
+    )
     lam, _ = build_draped_laminate([DrapedPly(ARIDHI, t1, t2)])
     m = Shell(nodes, elements, lam)
     left = nodes[:, 0] < 1e-9
@@ -134,7 +151,9 @@ def test_areal_thickness_mode():
 def test_bias_extension_kinematics():
     W, L, d = 70.0, 210.0, 50.0
     assert math.degrees(bias_extension_shear(W, L, d)) == pytest.approx(57.33, abs=0.01)
-    X = torch.tensor([[0.0, L], [W, L], [0.0, 0.0], [35.0, 105.0], [10.0, 30.0], [35.0, 5.0]])
+    X = torch.tensor(
+        [[0.0, L], [W, L], [0.0, 0.0], [35.0, 105.0], [10.0, 30.0], [35.0, 5.0]]
+    )
     k = bias_extension_kinematics(X, W, L, d, n_path=2000)
     assert k["zone"].tolist() == [0, 0, 0, 2, 1, 0]
     # top clamp translated by d, bottom fixed, yarns inextensible
@@ -181,13 +200,18 @@ def test_forming_membrane_trellis_tangent(gamma):
     m = WovenFormingMembrane(35400.0, 35400.0).vectorize(1)
     c, s = math.cos(gamma), math.sin(gamma)
     F = torch.tensor([[1.0, s], [0.0, c]])[None]
-    P, _, C = m.step(torch.zeros(1, 2, 2), F, None, torch.zeros(1, 0), None, None, 0)
+    z = torch.zeros(1, 2, 2)
+    P, _, C = m.step(z, F, z, torch.zeros(1, 0), z, torch.ones(1, 1), 0)
     dF = torch.tensor([[0.0, c], [0.0, -s]])
     ddF = torch.tensor([[0.0, -s], [0.0, -c]])
     tau = (P[0] * dF).sum()
     G = torch.einsum("ij,ijkl,kl->", dF, C[0], dF) + (P[0] * ddF).sum()
-    assert tau.item() == pytest.approx(shear_stress(torch.tensor(gamma)).item(), abs=1e-12)
-    assert G.item() == pytest.approx(shear_modulus(torch.tensor(gamma)).item(), rel=1e-9)
+    assert tau.item() == pytest.approx(
+        shear_stress(torch.tensor(gamma)).item(), abs=1e-12
+    )
+    assert G.item() == pytest.approx(
+        shear_modulus(torch.tensor(gamma)).item(), rel=1e-9
+    )
     st = WovenFormingMembrane.yarn_state(F, m.params)
     assert st["gamma"].item() == pytest.approx(gamma)
 

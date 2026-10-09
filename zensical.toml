@@ -13,9 +13,19 @@ nav = [
   { "Installation" = "installation.md" },
   { "Getting Started" = "getting_started.md" },
   { "Differentiability" = "differentiability.md" },
+  { "Examples" = "examples.md" },
   { "Theory" = "theory.md" },
   { "Performance" = "performance.md" },
   { "Publications" = "publications.md" },
+  { "Models" = [
+    { "Base" = "models/index.md" },
+    { "Truss" = "models/truss.md" },
+    { "Planar" = "models/planar.md" },
+    { "Axisymmetric" = "models/axisymmetric.md" },
+    { "Shell" = "models/shell.md" },
+    { "Solid" = "models/solid.md" },
+    { "Assembly" = "models/assembly.md" },
+  ] },
   { "Materials" = [
     { "Base" = "materials/index.md" },
     { "Elasticity" = [
@@ -26,7 +36,9 @@ nav = [
       { "Orthotropic 3D" = "materials/elasticity/orthotropic_elasticity_3D.md" },
       { "Transverse 3D" = "materials/elasticity/transverse_isotropic_elasticity_3D.md" },
       { "Orthotropic Plane Stress" = "materials/elasticity/orthotropic_elasticity_plane_stress.md" },
+      { "Transverse Plane Stress" = "materials/elasticity/transverse_isotropic_elasticity_plane_stress.md" },
       { "Orthotropic Plane Strain" = "materials/elasticity/orthotropic_elasticity_plane_strain.md" },
+      { "Transverse Plane Strain" = "materials/elasticity/transverse_isotropic_elasticity_plane_strain.md" },
     ] },
     { "Hyperelasticity" = [
       { "3D" = "materials/hyperelasticity/hyperelastic_3D.md" },
@@ -41,7 +53,18 @@ nav = [
     ] },
     { "Damage" = [
       { "Isotropic 3D" = "materials/damage/isotropic_damage_3D.md" },
+      { "Isotropic Plane Strain" = "materials/damage/isotropic_damage_plane_strain.md" },
+      { "Isotropic Plane Stress" = "materials/damage/isotropic_damage_plane_stress.md" },
+      { "Isotropic 1D" = "materials/damage/isotropic_damage_1D.md" },
     ] },
+    { "Conductivity" = [
+      { "Isotropic 3D" = "materials/conductivity/isotropic_conductivity_3D.md" },
+      { "Isotropic 2D" = "materials/conductivity/isotropic_conductivity_2D.md" },
+      { "Isotropic 1D" = "materials/conductivity/isotropic_conductivity_1D.md" },
+      { "Orthotropic 3D" = "materials/conductivity/orthotropic_conductivity_3D.md" },
+      { "Orthotropic 2D" = "materials/conductivity/orthotropic_conductivity_2D.md" },
+    ] },
+    { "Laminate" = "materials/laminate.md" },
   ] },
     { "Elements" = [
     { "Base" = "elements/index.md" },
@@ -62,6 +85,12 @@ nav = [
       { "Hexa2" = "elements/3d/hexa2.md" },
     ] },
   ] },
+  { "Mesh" = [
+    { "Base" = "mesh/index.md" },
+    { "Generators" = "mesh/generators.md" },
+    { "Conversion" = "mesh/conversion.md" },
+    { "Files" = "mesh/files.md" },
+  ] },
 ]
 
 extra_javascript = [
@@ -72,6 +101,7 @@ extra_javascript = [
 [project.theme]
 language = "en"
 logo = "images/logo.png"
+favicon = "images/favicon.png"
 
 
 features = [

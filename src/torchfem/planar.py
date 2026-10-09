@@ -3,16 +3,30 @@ from functools import cached_property
 import matplotlib.pyplot as plt
 import torch
 from matplotlib.axes import Axes
-from matplotlib.collections import LineCollection, PolyCollection
+from matplotlib.collections import PolyCollection
+from matplotlib.colors import Colormap
 from matplotlib.tri import Triangulation
 from torch import Tensor
 
-from .base import Heat, Mechanics
+from .base import FEM, Heat, Mechanics
 from .elements import Element, Quad1, Quad2, Tria1, Tria2
 from .materials import Material
+from .plot_utils import LABEL_OFFSET, arrows2d, dots2d, markers2d, signs2d
 
 
-class Planar(Mechanics):
+class PlanarGeometry(FEM):
+    """The elements, integration and plotting shared by the planar models.
+
+    It carries the discretization of a surface in the z=0 plane, which `Planar`
+    and `PlanarHeat` combine with the physics they solve.
+
+    Attributes:
+        nodes: Nodal coordinates with shape [n_nod, 2].
+        elements: Element connectivity with shape [n_elem, nodes_per_element].
+        material: Vectorized material model.
+        thickness: Element thicknesses with shape [n_elem].
+        constraints: Boolean mask of constrained DOFs with shape [n_nod, n_dof].
+    """
 
     def __init__(
         self,
@@ -21,7 +35,15 @@ class Planar(Mechanics):
         material: Material,
         thickness: Tensor | float = 1.0,
     ):
-        """Initialize the planar FEM problem."""
+        """Initialize the planar FEM problem.
+
+        Args:
+            nodes: Nodal coordinates with shape [n_nod, 2].
+            elements: Connectivity with shape [n_elem, nodes_per_element].
+            material: Plane-stress or plane-strain material model.
+            thickness: Element thickness. A float is expanded to all elements,
+                a tensor assigns one thickness per element.
+        """
 
         super().__init__(nodes, elements, material)
 
@@ -32,15 +54,10 @@ class Planar(Mechanics):
             self.thickness = torch.as_tensor(thickness)
 
     def __repr__(self) -> str:
-        etype = self.etype.__class__.__name__
+        etype = self.etype.__name__
         return (
             f"<torch-fem planar ({self.n_nod} nodes, {self.n_elem} {etype} elements)>"
         )
-
-    @property
-    def n_flux(self) -> list[int]:
-        """Shape of the stress tensor."""
-        return [2, 2]
 
     @property
     def etype(self) -> type[Element]:
@@ -62,9 +79,13 @@ class Planar(Mechanics):
         areas = self.integrate_field()
         return areas ** (1 / 2)
 
+    @property
+    def volume_scale(self) -> Tensor:
+        return self.thickness
+
     def compute_k(self, detJ: Tensor, BCB: Tensor):
         """Element stiffness matrix contribution."""
-        return torch.einsum("...,...,...kl->...kl", self.thickness, detJ, BCB)
+        return BCB.mul_((self.thickness * detJ)[..., None, None])
 
     def compute_f(self, detJ: Tensor, B: Tensor, S: Tensor):
         """Element internal force vector."""
@@ -78,16 +99,16 @@ class Planar(Mechanics):
     def plot(
         self,
         u: float | Tensor = 0.0,
-        node_property: Tensor | None = None,
-        element_property: Tensor | None = None,
+        node_property: Tensor | dict[str, Tensor] | None = None,
+        element_property: Tensor | dict[str, Tensor] | None = None,
         orientation: Tensor | None = None,
         node_labels: bool = False,
         node_markers: bool = False,
         axes: bool = False,
         bcs: bool = True,
-        color: str = "black",
+        color: str = "lightblue",
         alpha: float = 1.0,
-        cmap: str = "viridis",
+        cmap: str | Colormap = "viridis",
         linewidth: float = 1.0,
         figsize: tuple[float, float] = (8.0, 6.0),
         colorbar: bool = False,
@@ -97,33 +118,86 @@ class Planar(Mechanics):
         ax: Axes | None = None,
         **kwargs,
     ):
+        """Plot the mesh with matplotlib, optionally with results.
+
+        Args:
+            u: Nodal displacements added to the positions, e.g. to plot the
+                deformed configuration. Defaults to 0.0 (undeformed).
+            node_property: Scalar nodal field with shape [n_nod] rendered as
+                interpolated contours, optionally keyed by its colorbar label.
+            element_property: Element field rendered as flat colors (shape
+                [n_elem]) or as vector arrows (shape [n_elem, 2]), keyed like
+                `node_property`.
+            orientation: Element-wise material angles in radians, measured
+                counter-clockwise, rendered as line markers.
+            node_labels: If True, annotates nodes with their indices.
+            node_markers: If True, draws markers at nodal positions.
+            axes: If True, shows the coordinate axes.
+            bcs: If True, indicates applied forces as arrows scaled relative to
+                each other and constrained DOFs as markers. In the undeformed
+                configuration, prescribed non-zero displacements are drawn to
+                scale as arrows with a dot at the tip instead of a marker. In
+                the deformed configuration, only the dot is drawn, marking the
+                position the node was pulled to. A heat flux is drawn as a plus
+                or a minus, and a prescribed temperature keeps its marker.
+            color: Element fill color. Edges, markers and labels follow the foreground
+                of the style.
+            alpha: Opacity of nodal contour plots.
+            cmap: Matplotlib colormap or its name.
+            linewidth: Element edge line width. Set to 0.0 to hide edges.
+            figsize: Figure size when a new figure is created.
+            colorbar: If True, adds a colorbar.
+            vmin: Lower color limit.
+            vmax: Upper color limit.
+            title: Plot title.
+            ax: Existing matplotlib axes to plot into.
+            **kwargs: Forwarded to the `PolyCollection` of the elements, e.g.
+                `edgecolor` to override the foreground or `hatch` to fill them
+                with a pattern.
+        """
         # Compute deformed positions
         pos = self.nodes + u
 
         # Copy all tensors to CPU
         pos = pos.cpu()
         elements = self.elements.cpu()
-        forces = self.forces.cpu()
-        constraints = self.constraints
+        neumann = self._neumann.cpu()
+        constraints = self.constraints.cpu()
+        prescribed = torch.where(constraints, self._dirichlet.cpu(), 0.0)
+
+        # In a deformed configuration the prescribed displacements are already
+        # visible in the plotted positions, so only their tips are drawn there.
+        deformed = isinstance(u, Tensor)
 
         # Bounding box
-        size = torch.linalg.norm(pos.max() - pos.min())
+        size = float(torch.linalg.norm(pos.max() - pos.min()))
 
         # Set figure size
         if ax is None:
             _, ax = plt.subplots(figsize=figsize)
 
+        # Edges, markers and labels follow the style, so a dark theme flips them
+        foreground = plt.rcParams["text.color"]
+
+        # Quadratic elements are drawn through their corner nodes
+        corners = elements[:, :3] if self.etype in (Tria1, Tria2) else elements[:, :4]
+        verts = list(pos[corners].numpy())
+
+        # A bare field is titled by its argument, a named one by its key
+        if isinstance(node_property, Tensor):
+            node_property = {"node_property": node_property}
+        if isinstance(element_property, Tensor):
+            element_property = {"element_property": element_property}
+
+        # A property colored onto the surface replaces the plain fill
+        colored = bool(node_property)
+
         # Color surface with interpolated nodal properties (if provided)
-        if node_property is not None:
+        if node_property:
+            node_label, node_property = next(iter(node_property.items()))
             node_property = node_property.squeeze().cpu()
-            if self.etype is Quad1 or self.etype is Quad2:
-                triangles = []
-                for e in elements:
-                    triangles.append([e[0], e[1], e[2]])
-                    triangles.append([e[2], e[3], e[0]])
-            else:
-                triangles = elements[:, :3].tolist()
-            triangulation = Triangulation(pos[:, 0], pos[:, 1], triangles)
+            fan = [corners[:, [0, i, i + 1]] for i in range(1, corners.shape[1] - 1)]
+            triangulation = Triangulation(pos[:, 0], pos[:, 1], torch.cat(fan))
             # Adjust levels for some edge cases
             levels = torch.linspace(
                 node_property.min(), 1.001 * node_property.max() + 1e-8, 100
@@ -138,25 +212,21 @@ class Planar(Mechanics):
                 vmax=vmax,
             )
             if colorbar:
-                plt.colorbar(tri, ax=ax)
+                plt.colorbar(tri, ax=ax, label=node_label)
 
         # Color surface with element properties (if provided)
-        if element_property is not None:
+        if element_property:
+            element_label, element_property = next(iter(element_property.items()))
             element_property = element_property.squeeze().cpu()
             if element_property.numel() == self.n_elem:
                 # Plot scalar field
-                if self.etype is Tria2:
-                    verts = pos[elements[:, :3]]
-                elif self.etype is Quad2:
-                    verts = pos[elements[:, :4]]
-                else:
-                    verts = pos[elements]
-                pc = PolyCollection([v for v in verts.numpy()], cmap=cmap)
+                colored = True
+                pc = PolyCollection(verts, cmap=cmap)
                 pc.set_array(element_property)
+                pc.set_clim(vmin=vmin, vmax=vmax)
                 ax.add_collection(pc)
                 if colorbar:
-                    plt.colorbar(pc, ax=ax)
-                    pc.set_clim(vmin=vmin, vmax=vmax)
+                    plt.colorbar(pc, ax=ax, label=element_label)
             elif element_property.numel() == 2 * self.n_elem:
                 # Plot vector field
                 centers = pos[elements, :].mean(dim=1)
@@ -171,75 +241,51 @@ class Planar(Mechanics):
                     torch.linalg.norm(element_property, dim=1),
                     pivot="middle",
                     cmap=cmap,
+                    zorder=2,
                 )
+
+        # Elements, styled further by any extra keyword
+        ax.add_collection(
+            PolyCollection(
+                verts,
+                facecolors="none" if colored else color,
+                edgecolors=foreground,
+                linewidths=linewidth,
+                **kwargs,
+            )
+        )
 
         # Nodes
         if node_markers:
-            ax.scatter(pos[:, 0], pos[:, 1], color=color, marker="o")
+            ax.scatter(pos[:, 0], pos[:, 1], color=foreground, marker="o", zorder=3)
             if node_labels:
-                for i, node in enumerate(pos):
-                    ax.annotate(
-                        str(i),
-                        (node[0].item() + 0.01, node[1].item() + 0.01),
-                        color=color,
-                    )
+                for i, (x, y) in enumerate(pos.tolist()):
+                    ax.annotate(str(i), (x, y), color=foreground, **LABEL_OFFSET)
 
-        # Elements
-        if linewidth > 0.0:
-            coords = pos[elements]
-            if self.etype is Tria2:
-                coords = coords[:, :3]
-            if self.etype is Quad2:
-                coords = coords[:, :4]
-            closed_segments = torch.cat([coords, coords[:, :1, :]], dim=1)
-            segments = closed_segments[:, :, None, :]
-            segments = torch.cat([segments[:, :-1], segments[:, 1:]], dim=2)
-            segments = segments.reshape(-1, 2, 2)
-            lc = LineCollection(segments.tolist(), colors=color, linewidths=linewidth)
-            ax.add_collection(lc)
-
-        # Forces
+        # Boundary conditions
+        tips = [pos]
         if bcs:
-            for i, force in enumerate(forces):
-                if torch.norm(force) > 0.0:
-                    x = float(pos[i][0])
-                    y = float(pos[i][1])
-                    ax.arrow(
-                        x,
-                        y,
-                        size * 0.05 * force[0] / torch.norm(force),
-                        size * 0.05 * force[1] / torch.norm(force),
-                        width=0.01 * size,
-                        facecolor="gray",
-                        linewidth=0.0,
-                        zorder=10,
-                    )
-
-        # Constraints
-        if bcs:
-            for i, constraint in enumerate(constraints):
-                x = float(pos[i][0])
-                y = float(pos[i][1])
-                if len(constraint) == 2:
-                    if constraint[0]:
-                        ax.plot(x - 0.01 * size, y, ">", color="gray")
-                    if constraint[1]:
-                        ax.plot(x, y - 0.01 * size, "^", color="gray")
-                elif len(constraint) == 1:
-                    if constraint[0]:
-                        ax.plot(x, y, "s", color="gray")
+            # A temperature carries no load arrow, and a prescribed one keeps
+            # its marker rather than being drawn to scale
+            if neumann.shape[1] == 2:
+                fixed = constraints & (deformed | (prescribed == 0.0))
+                width = 0.01 * size
+                tips.append(arrows2d(ax, pos, neumann, width, span=0.1 * size))
+                if not deformed:
+                    tips.append(arrows2d(ax, pos, prescribed, width))
+                pulled = torch.linalg.norm(prescribed, dim=1) > 0.0
+                ends = (pos if deformed else pos + prescribed)[pulled]
+                dots2d(ax, ends)
+            else:
+                fixed = constraints
+                signs2d(ax, pos, neumann[:, 0])
+            markers2d(ax, pos, fixed)
 
         # Material orientations
         if orientation is not None:
             orientation = orientation.cpu()
             centers = pos[elements, :].mean(dim=1)
-            dir = torch.stack(
-                [
-                    torch.cos(orientation),
-                    -torch.sin(orientation),
-                    torch.zeros_like(orientation),
-                ]
-            ).T
+            dir = torch.stack([torch.cos(orientation), torch.sin(orientation)]).T
             ax.quiver(
                 centers[:, 0],
                 centers[:, 1],
@@ -252,10 +298,11 @@ class Planar(Mechanics):
                 width=0.005,
             )
 
-        # Plot limits (collections do not autoscale)
+        # Plot limits (collections do not autoscale), including arrow tips
+        lo, hi = torch.cat(tips).aminmax(dim=0)
         margin = 0.1 * size
-        ax.set_xlim(pos[:, 0].min() - margin, pos[:, 0].max() + margin)
-        ax.set_ylim(pos[:, 1].min() - margin, pos[:, 1].max() + margin)
+        ax.set_xlim(float(lo[0]) - margin, float(hi[0]) + margin)
+        ax.set_ylim(float(lo[1]) - margin, float(hi[1]) + margin)
         ax.set_aspect("equal", adjustable="box")
 
         if title:
@@ -265,8 +312,37 @@ class Planar(Mechanics):
             ax.set_axis_off()
 
 
-class PlanarHeat(Heat, Planar):
+class Planar(PlanarGeometry, Mechanics):
+    """Planar mechanics model for plane-stress or plane-strain problems.
 
-    def __init__(self, nodes: Tensor, elements: Tensor, material: Material):
-        super().__init__(nodes, elements, material)
-        self._external_gradient = torch.zeros(self.n_elem, *self.n_flux)
+    Attributes:
+        nodes: Nodal coordinates with shape [n_nod, 2].
+        elements: Element connectivity with shape [n_elem, nodes_per_element].
+        material: Vectorized material model.
+        thickness: Element thicknesses with shape [n_elem].
+        forces: Applied nodal forces with shape [n_nod, 2].
+        displacements: Prescribed nodal displacements with shape [n_nod, 2].
+        constraints: Boolean mask of constrained DOFs with shape [n_nod, 2].
+    """
+
+    @property
+    def n_flux(self) -> list[int]:
+        """Shape of the stress tensor."""
+        return [2, 2]
+
+
+class PlanarHeat(PlanarGeometry, Heat):
+    """Planar heat conduction model.
+
+    Uses the same elements and plotting as `Planar`, but with a single
+    temperature degree of freedom per node.
+
+    Attributes:
+        nodes: Nodal coordinates with shape [n_nod, 2].
+        elements: Element connectivity with shape [n_elem, nodes_per_element].
+        material: Vectorized thermal material model.
+        thickness: Element thicknesses with shape [n_elem].
+        heat_flux: Applied nodal heat sources with shape [n_nod, 1].
+        temperatures: Prescribed nodal temperatures with shape [n_nod, 1].
+        constraints: Boolean mask of constrained DOFs with shape [n_nod, 1].
+    """

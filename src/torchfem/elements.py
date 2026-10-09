@@ -1,7 +1,5 @@
 from abc import ABC, abstractmethod
 from math import sqrt
-from pathlib import Path
-from typing import Literal
 
 import numpy as np
 import torch
@@ -9,8 +7,6 @@ from torch import Tensor
 
 # Registry of all concrete Element subclasses
 ELEMENT_REGISTRY: list[type["Element"]] = []
-
-FIGURE_ROOT = Path(__file__).resolve().parents[2] / "docs" / "images"
 
 
 class ClassPropertyDescriptor:
@@ -36,23 +32,35 @@ class Element(ABC):
             (length/area/volume).
         iso_dim (int): Reference-space dimension.
         nodes (int): Number of nodes per element.
-        meshio_type (Literal): Mesh cell type used for meshio I/O.
+        meshio_type (str): Mesh cell type used for meshio I/O.
+        facet_type (type[Element]): Element type of a codimension-1 facet.
+        facets (Tensor): Local node indices of the codimension-1 facets, i.e. the
+            edges of a surface element or the faces of a volume element. Faces are
+            wound so that their normal points out of the element. Line elements
+            have no facets.
+        edges (Tensor): Local node indices of the element edges, ordered as the
+            mid-side nodes of the corresponding quadratic element.
     """
 
     iso_volume: float
     iso_dim: int
     nodes: int
-    meshio_type: Literal[
-        "line",
-        "triangle",
-        "triangle6",
-        "quad",
-        "quad8",
-        "tetra",
-        "tetra10",
-        "hexahedron",
-        "hexahedron20",
-    ]
+    meshio_type: str
+    facet_type: type["Element"]
+
+    @classproperty
+    def facets(cls) -> Tensor:
+        """Local node indices of the codimension-1 facets.
+
+        Raises:
+            NotImplementedError: For line elements, which have no facets.
+        """
+        raise NotImplementedError(f"{cls.__name__} has no facets.")
+
+    @classproperty
+    def edges(cls) -> Tensor:
+        """Local node indices of the element edges."""
+        raise NotImplementedError(f"{cls.__name__} has no edges.")
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -76,9 +84,8 @@ class Element(ABC):
         pass
 
     @classmethod
-    @abstractmethod
     def B(cls, xi: Tensor) -> Tensor:
-        """Evaluate reference-space derivatives of shape functions.
+        """Evaluate reference-space derivatives of shape functions by autodiff.
 
         Args:
             xi (Tensor): Reference coordinates.
@@ -88,7 +95,28 @@ class Element(ABC):
             Tensor: Derivatives `dN/dxi`.
                 *Shape:* `(iso_dim, nodes)` or `(n_points, iso_dim, nodes)`.
         """
-        pass
+        b = torch.func.jacrev(cls.N)
+        for _ in range(xi.dim() - 1):
+            b = torch.func.vmap(b)
+        return b(xi).movedim(-2, -1)
+
+    @classmethod
+    def H(cls, xi: Tensor) -> Tensor:
+        """Evaluate reference-space second derivatives of shape functions by autodiff.
+
+        Args:
+            xi (Tensor): Reference coordinates.
+                *Shape:* `(iso_dim,)` or `(n_points, iso_dim)`.
+
+        Returns:
+            Tensor: Second derivatives `d²N/dxi_i dxi_j`.
+                *Shape:* `(iso_dim, iso_dim, nodes)` or
+                `(n_points, iso_dim, iso_dim, nodes)`.
+        """
+        h = torch.func.jacrev(torch.func.jacrev(cls.N))
+        for _ in range(xi.dim() - 1):
+            h = torch.func.vmap(h)
+        return h(xi).movedim(-3, -1)
 
     @classproperty
     @abstractmethod
@@ -142,19 +170,15 @@ class Bar1(Element):
     def iso_coords(cls) -> Tensor:
         return torch.tensor([[-1.0], [1.0]])
 
+    @classproperty
+    def edges(cls) -> Tensor:
+        return torch.tensor([[0, 1]])
+
     @classmethod
     def N(cls, xi: Tensor) -> Tensor:
         N_1 = 1 - xi[..., 0]
         N_2 = 1 + xi[..., 0]
         return 1 / 2 * torch.stack([N_1, N_2], dim=-1)
-
-    @classmethod
-    def B(cls, xi: Tensor) -> Tensor:
-        if xi.dim() == 1:
-            return torch.tensor([[-0.5, 0.5]])
-        else:
-            N = xi.shape[0]
-            return torch.tensor([[-0.5, 0.5]]).repeat(N, 1, 1)
 
     @classproperty
     def iweights(cls) -> Tensor:
@@ -163,27 +187,6 @@ class Bar1(Element):
     @classproperty
     def ipoints(cls) -> Tensor:
         return torch.tensor([[0.0]])
-
-    @classmethod
-    def plot(cls, n_points: int = 100, path: Path = FIGURE_ROOT):
-        import matplotlib.pyplot as plt
-
-        # Compute shape functions at evenly spaced points in reference space
-        xi = torch.linspace(-1.0, 1.0, n_points).unsqueeze(-1)
-        N = cls.N(xi)
-
-        # Create plot
-        fig, ax = plt.subplots(figsize=(6, 4))
-        for i in range(cls.nodes):
-            ax.plot(xi, N[:, i], linewidth=2.0, label=f"$N_{i}$")
-        ax.set_xlabel("$\\xi$")
-        ax.set_ylabel("$N_i(\\xi)$")
-        ax.grid(alpha=0.3)
-        ax.legend()
-
-        # Save plot to docs/images directory
-        save_path = path / f"{cls.__name__}_shape_functions.png"
-        fig.savefig(save_path, dpi=200, bbox_inches="tight")
 
 
 class Bar2(Bar1):
@@ -202,28 +205,16 @@ class Bar2(Bar1):
     def iso_coords(cls) -> Tensor:
         return torch.tensor([[-1.0], [1.0], [0.0]])
 
+    @classproperty
+    def edges(cls) -> Tensor:
+        return torch.tensor([[0, 1, 2]])
+
     @classmethod
     def N(cls, xi: Tensor) -> Tensor:
         N_1 = 1 / 2 * xi[..., 0] * (xi[..., 0] - 1)
         N_2 = 1 / 2 * xi[..., 0] * (xi[..., 0] + 1)
         N_3 = 1 - xi[..., 0] ** 2
         return torch.stack([N_1, N_2, N_3], dim=-1)
-
-    @classmethod
-    def B(cls, xi: Tensor) -> Tensor:
-        return torch.stack(
-            [
-                torch.stack(
-                    [
-                        0.5 * (2 * xi[..., 0] - 1),
-                        0.5 * (2 * xi[..., 0] + 1),
-                        -2 * xi[..., 0],
-                    ],
-                    dim=-1,
-                )
-            ],
-            dim=xi.dim() - 1,
-        )
 
     @classproperty
     def iweights(cls) -> Tensor:
@@ -232,27 +223,6 @@ class Bar2(Bar1):
     @classproperty
     def ipoints(cls) -> Tensor:
         return torch.tensor([[-1.0 / sqrt(3.0)], [1.0 / sqrt(3.0)]])
-
-    @classmethod
-    def plot(cls, n_points: int = 100, path: Path = FIGURE_ROOT):
-        import matplotlib.pyplot as plt
-
-        # Compute shape functions at evenly spaced points in reference space
-        xi = torch.linspace(-1.0, 1.0, n_points).unsqueeze(-1)
-        N = cls.N(xi)
-
-        # Create plot
-        fig, ax = plt.subplots(figsize=(6, 4))
-        for i in range(cls.nodes):
-            ax.plot(xi, N[:, i], linewidth=2.0, label=f"$N_{i}$")
-        ax.set_xlabel("$\\xi$")
-        ax.set_ylabel("$N_i(\\xi)$")
-        ax.grid(alpha=0.3)
-        ax.legend()
-
-        # Save plot to docs/images directory
-        save_path = path / f"{cls.__name__}_shape_functions.png"
-        fig.savefig(save_path, dpi=200, bbox_inches="tight")
 
 
 class Tria1(Element):
@@ -271,10 +241,19 @@ class Tria1(Element):
     iso_dim = 2
     nodes = 3
     meshio_type = "triangle"
+    facet_type = Bar1
 
     @classproperty
     def iso_coords(cls) -> Tensor:
         return torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+
+    @classproperty
+    def facets(cls) -> Tensor:
+        return torch.tensor([[0, 1], [1, 2], [2, 0]])
+
+    @classproperty
+    def edges(cls) -> Tensor:
+        return cls.facets
 
     @classmethod
     def N(cls, xi: Tensor) -> Tensor:
@@ -283,14 +262,6 @@ class Tria1(Element):
         N_3 = xi[..., 1]
         return torch.stack([N_1, N_2, N_3], dim=-1)
 
-    @classmethod
-    def B(cls, xi: Tensor) -> Tensor:
-        if xi.dim() == 1:
-            return torch.tensor([[-1.0, 1.0, 0.0], [-1.0, 0.0, 1.0]])
-        else:
-            N = xi.shape[0]
-            return torch.tensor([[-1.0, 1.0, 0.0], [-1.0, 0.0, 1.0]]).repeat(N, 1, 1)
-
     @classproperty
     def iweights(cls) -> Tensor:
         return torch.tensor([0.5])
@@ -298,29 +269,6 @@ class Tria1(Element):
     @classproperty
     def ipoints(cls) -> Tensor:
         return torch.tensor([[1.0 / 3.0, 1.0 / 3.0]])
-
-    @classmethod
-    def plot(cls, n_points: int = 30, path: Path = FIGURE_ROOT):
-        import matplotlib.pyplot as plt
-
-        # Sample inside triangular reference domain (ξ₁ ≥ 0, ξ₂ ≥ 0, ξ₁+ξ₂ ≤ 1)
-        t = np.linspace(0.0, 1.0, n_points)
-        xi1, xi2 = np.meshgrid(t, t)
-        mask = (xi1 + xi2) <= 1.0
-        xi1f, xi2f = xi1[mask], xi2[mask]
-        xi = torch.tensor(np.stack([xi1f, xi2f], axis=-1), dtype=torch.float32)
-        N = cls.N(xi).detach().cpu().numpy()
-
-        fig, axes = plt.subplots(1, 3, figsize=(10, 4), subplot_kw={"projection": "3d"})
-        for i, ax in enumerate(axes):
-            ax.plot_trisurf(xi1f, xi2f, N[:, i], color=f"C{i}", alpha=0.9)
-            ax.set_xlabel("$\\xi_1$")
-            ax.set_ylabel("$\\xi_2$")
-            ax.set_title(f"$N_{i}$")
-
-        fig.tight_layout()
-        filename = path / f"{cls.__name__}_shape_functions.png"
-        fig.savefig(filename, dpi=200, bbox_inches="tight")
 
 
 class Tria2(Tria1):
@@ -338,6 +286,11 @@ class Tria2(Tria1):
 
     nodes = 6
     meshio_type = "triangle6"
+    facet_type = Bar2
+
+    @classproperty
+    def facets(cls) -> Tensor:
+        return torch.tensor([[0, 1, 3], [1, 2, 4], [2, 0, 5]])
 
     @classproperty
     def iso_coords(cls) -> Tensor:
@@ -362,67 +315,13 @@ class Tria2(Tria1):
         N_6 = 4 * xi[..., 1] * (1 - xi[..., 0] - xi[..., 1])
         return torch.stack([N_1, N_2, N_3, N_4, N_5, N_6], dim=-1)
 
-    @classmethod
-    def B(cls, xi: Tensor) -> Tensor:
-        zeros = torch.zeros_like(xi[..., 0])
-        return torch.stack(
-            [
-                torch.stack(
-                    [
-                        4 * xi[..., 0] + 4 * xi[..., 1] - 3,
-                        4 * xi[..., 0] - 1,
-                        zeros,
-                        -4 * (2 * xi[..., 0] + xi[..., 1] - 1),
-                        4 * xi[..., 1],
-                        -4 * xi[..., 1],
-                    ],
-                    dim=-1,
-                ),
-                torch.stack(
-                    [
-                        4 * xi[..., 0] + 4 * xi[..., 1] - 3,
-                        zeros,
-                        4 * xi[..., 1] - 1,
-                        -4 * xi[..., 0],
-                        4 * xi[..., 0],
-                        -4 * (xi[..., 0] + 2 * xi[..., 1] - 1),
-                    ],
-                    dim=-1,
-                ),
-            ],
-            dim=xi.dim() - 1,
-        )
-
     @classproperty
     def iweights(cls) -> Tensor:
         return torch.tensor([1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0])
 
     @classproperty
     def ipoints(cls) -> Tensor:
-        return torch.tensor([[0.5, 0.5], [0.5, 0.0], [0.0, 0.5]])
-
-    @classmethod
-    def plot(cls, n_points: int = 30, path: Path = FIGURE_ROOT):
-        import matplotlib.pyplot as plt
-
-        # Sample inside triangular reference domain (ξ₁ ≥ 0, ξ₂ ≥ 0, ξ₁+ξ₂ ≤ 1)
-        t = np.linspace(0.0, 1.0, n_points)
-        xi1, xi2 = np.meshgrid(t, t)
-        mask = (xi1 + xi2) <= 1.0
-        xi1f, xi2f = xi1[mask], xi2[mask]
-        xi = torch.tensor(np.stack([xi1f, xi2f], axis=-1), dtype=torch.float32)
-        N = cls.N(xi).detach().cpu().numpy()
-
-        fig, axes = plt.subplots(2, 3, figsize=(10, 8), subplot_kw={"projection": "3d"})
-        for i, ax in enumerate(axes.ravel()):
-            ax.plot_trisurf(xi1f, xi2f, N[:, i], color=f"C{i}", alpha=0.9)
-            ax.set_xlabel("$\\xi_1$")
-            ax.set_ylabel("$\\xi_2$")
-            ax.set_title(f"$N_{i}$")
-
-        fig.tight_layout()
-        filename = path / f"{cls.__name__}_shape_functions.png"
-        fig.savefig(filename, dpi=200, bbox_inches="tight")
+        return torch.tensor([[1 / 6, 1 / 6], [2 / 3, 1 / 6], [1 / 6, 2 / 3]])
 
 
 class Quad1(Element):
@@ -441,10 +340,19 @@ class Quad1(Element):
     iso_dim = 2
     nodes = 4
     meshio_type = "quad"
+    facet_type = Bar1
 
     @classproperty
     def iso_coords(cls) -> Tensor:
         return torch.tensor([[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]])
+
+    @classproperty
+    def facets(cls) -> Tensor:
+        return torch.tensor([[0, 1], [1, 2], [2, 3], [3, 0]])
+
+    @classproperty
+    def edges(cls) -> Tensor:
+        return cls.facets
 
     @classmethod
     def N(cls, xi: Tensor) -> Tensor:
@@ -454,35 +362,9 @@ class Quad1(Element):
         N_4 = (1.0 - xi[..., 0]) * (1.0 + xi[..., 1])
         return 0.25 * torch.stack([N_1, N_2, N_3, N_4], dim=-1)
 
-    @classmethod
-    def B(cls, xi: Tensor) -> Tensor:
-        return 0.25 * torch.stack(
-            [
-                torch.stack(
-                    [
-                        -(1 - xi[..., 1]),
-                        (1 - xi[..., 1]),
-                        (1.0 + xi[..., 1]),
-                        -(1.0 + xi[..., 1]),
-                    ],
-                    dim=-1,
-                ),
-                torch.stack(
-                    [
-                        -(1 - xi[..., 0]),
-                        -(1 + xi[..., 0]),
-                        (1.0 + xi[..., 0]),
-                        (1.0 - xi[..., 0]),
-                    ],
-                    dim=-1,
-                ),
-            ],
-            dim=xi.dim() - 1,
-        )
-
     @classproperty
     def iweights(cls) -> Tensor:
-        return torch.tensor([1, 1, 1, 1])
+        return torch.tensor([1.0, 1.0, 1.0, 1.0])
 
     @classproperty
     def ipoints(cls) -> Tensor:
@@ -493,36 +375,6 @@ class Quad1(Element):
                 for xi_1 in [-1, 1]
             ]
         )
-
-    @classmethod
-    def plot(cls, n_points: int = 30, path: Path = FIGURE_ROOT):
-        import matplotlib.pyplot as plt
-
-        # Sample on the square reference domain (ξ₁, ξ₂ ∈ [-1, 1])
-        t = np.linspace(-1.0, 1.0, n_points)
-        xi1, xi2 = np.meshgrid(t, t)
-        xi = torch.tensor(
-            np.stack([xi1.ravel(), xi2.ravel()], axis=-1), dtype=torch.float32
-        )
-        N = cls.N(xi).detach().cpu().numpy()
-
-        fig, axes = plt.subplots(2, 2, figsize=(8, 8), subplot_kw={"projection": "3d"})
-        for i, ax in enumerate(axes.ravel()):
-            ax.plot_surface(
-                xi1,
-                xi2,
-                N[:, i].reshape(n_points, n_points),
-                color=f"C{i}",
-                alpha=0.9,
-                linewidth=0,
-            )
-            ax.set_xlabel("$\\xi_1$")
-            ax.set_ylabel("$\\xi_2$")
-            ax.set_title(f"$N_{i}$")
-
-        fig.tight_layout()
-        filename = path / f"{cls.__name__}_shape_functions.png"
-        fig.savefig(filename, dpi=200, bbox_inches="tight")
 
 
 class Quad2(Quad1):
@@ -540,6 +392,11 @@ class Quad2(Quad1):
 
     nodes = 8
     meshio_type = "quad8"
+    facet_type = Bar2
+
+    @classproperty
+    def facets(cls) -> Tensor:
+        return torch.tensor([[0, 1, 4], [1, 2, 5], [2, 3, 6], [3, 0, 7]])
 
     @classproperty
     def iso_coords(cls) -> Tensor:
@@ -570,43 +427,9 @@ class Quad2(Quad1):
         N_8 = 2 * (1 - xi[..., 0]) * (1 - xi[..., 1]) * (1 + xi[..., 1])
         return 0.25 * torch.stack([N_1, N_2, N_3, N_4, N_5, N_6, N_7, N_8], dim=-1)
 
-    @classmethod
-    def B(cls, xi: Tensor) -> Tensor:
-        return 0.25 * torch.stack(
-            [
-                torch.stack(
-                    [
-                        -(xi[..., 1] - 1) * (2 * xi[..., 0] + xi[..., 1]),
-                        -(xi[..., 1] - 1) * (2 * xi[..., 0] - xi[..., 1]),
-                        +(xi[..., 1] + 1) * (2 * xi[..., 0] + xi[..., 1]),
-                        +(xi[..., 1] + 1) * (2 * xi[..., 0] - xi[..., 1]),
-                        +4 * xi[..., 0] * (xi[..., 1] - 1),
-                        +2 - 2 * xi[..., 1] ** 2,
-                        -4 * xi[..., 0] * (xi[..., 1] + 1),
-                        -2 + 2 * xi[..., 1] ** 2,
-                    ],
-                    dim=-1,
-                ),
-                torch.stack(
-                    [
-                        -(xi[..., 0] - 1) * (xi[..., 0] + 2 * xi[..., 1]),
-                        -(xi[..., 0] + 1) * (xi[..., 0] - 2 * xi[..., 1]),
-                        +(xi[..., 0] + 1) * (xi[..., 0] + 2 * xi[..., 1]),
-                        +(xi[..., 0] - 1) * (xi[..., 0] - 2 * xi[..., 1]),
-                        -2 + 2 * xi[..., 0] ** 2,
-                        -4 * xi[..., 1] * (xi[..., 0] + 1),
-                        +2 - 2 * xi[..., 0] ** 2,
-                        +4 * (xi[..., 0] - 1) * xi[..., 1],
-                    ],
-                    dim=-1,
-                ),
-            ],
-            dim=xi.dim() - 1,
-        )
-
     @classproperty
     def iweights(cls) -> Tensor:
-        return torch.tensor([1, 1, 1, 1])
+        return torch.tensor([1.0, 1.0, 1.0, 1.0])
 
     @classproperty
     def ipoints(cls) -> Tensor:
@@ -617,36 +440,6 @@ class Quad2(Quad1):
                 for xi_1 in [-1, 1]
             ]
         )
-
-    @classmethod
-    def plot(cls, n_points: int = 30, path: Path = FIGURE_ROOT):
-        import matplotlib.pyplot as plt
-
-        # Sample on the square reference domain (ξ₁, ξ₂ ∈ [-1, 1])
-        t = np.linspace(-1.0, 1.0, n_points)
-        xi1, xi2 = np.meshgrid(t, t)
-        xi = torch.tensor(
-            np.stack([xi1.ravel(), xi2.ravel()], axis=-1), dtype=torch.float32
-        )
-        N = cls.N(xi).detach().cpu().numpy()
-
-        fig, axes = plt.subplots(2, 4, figsize=(14, 8), subplot_kw={"projection": "3d"})
-        for i, ax in enumerate(axes.ravel()):
-            ax.plot_surface(
-                xi1,
-                xi2,
-                N[:, i].reshape(n_points, n_points),
-                color=f"C{i}",
-                alpha=0.9,
-                linewidth=0,
-            )
-            ax.set_xlabel("$\\xi_1$")
-            ax.set_ylabel("$\\xi_2$")
-            ax.set_title(f"$N_{i}$")
-
-        fig.tight_layout()
-        filename = path / f"{cls.__name__}_shape_functions.png"
-        fig.savefig(filename, dpi=200, bbox_inches="tight")
 
 
 class Tetra1(Element):
@@ -670,12 +463,21 @@ class Tetra1(Element):
     iso_dim = 3
     nodes = 4
     meshio_type = "tetra"
+    facet_type = Tria1
 
     @classproperty
     def iso_coords(cls) -> Tensor:
         return torch.tensor(
             [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
         )
+
+    @classproperty
+    def facets(cls) -> Tensor:
+        return torch.tensor([[0, 2, 1], [0, 1, 3], [1, 2, 3], [0, 3, 2]])
+
+    @classproperty
+    def edges(cls) -> Tensor:
+        return torch.tensor([[0, 1], [1, 2], [0, 2], [3, 0], [1, 3], [2, 3]])
 
     @classmethod
     def N(cls, xi: Tensor) -> Tensor:
@@ -684,18 +486,6 @@ class Tetra1(Element):
         N_3 = xi[..., 1]
         N_4 = xi[..., 2]
         return torch.stack([N_1, N_2, N_3, N_4], dim=-1)
-
-    @classmethod
-    def B(cls, xi: Tensor) -> Tensor:
-        if xi.dim() == 1:
-            return torch.tensor(
-                [[-1.0, 1.0, 0.0, 0.0], [-1.0, 0.0, 1.0, 0.0], [-1.0, 0.0, 0.0, 1.0]]
-            )
-        else:
-            N = xi.shape[0]
-            return torch.tensor(
-                [[-1.0, 1.0, 0.0, 0.0], [-1.0, 0.0, 1.0, 0.0], [-1.0, 0.0, 0.0, 1.0]]
-            ).repeat(N, 1, 1)
 
     @classproperty
     def iweights(cls) -> Tensor:
@@ -725,6 +515,24 @@ class Tetra2(Tetra1):
 
     nodes = 10
     meshio_type = "tetra10"
+    facet_type = Tria2
+
+    @classproperty
+    def facets(cls) -> Tensor:
+        return torch.tensor(
+            [
+                [0, 2, 1, 6, 5, 4],
+                [0, 1, 3, 4, 8, 7],
+                [1, 2, 3, 5, 9, 8],
+                [0, 3, 2, 7, 9, 6],
+            ]
+        )
+
+    @classproperty
+    def edges(cls) -> Tensor:
+        return torch.tensor(
+            [[0, 1, 4], [1, 2, 5], [0, 2, 6], [3, 0, 7], [1, 3, 8], [2, 3, 9]]
+        )
 
     @classproperty
     def iso_coords(cls) -> Tensor:
@@ -761,60 +569,6 @@ class Tetra2(Tetra1):
         N_10 = 4 * xi[..., 1] * xi[..., 2]
         return torch.stack([N_1, N_2, N_3, N_4, N_5, N_6, N_7, N_8, N_9, N_10], dim=-1)
 
-    @classmethod
-    def B(cls, xi: Tensor) -> Tensor:
-        zeros = torch.zeros_like(xi[..., 0])
-        return torch.stack(
-            [
-                torch.stack(
-                    [
-                        4 * (xi[..., 0] + xi[..., 1] + xi[..., 2]) - 3,
-                        4 * xi[..., 0] - 1,
-                        zeros,
-                        zeros,
-                        -4 * (2 * xi[..., 0] + xi[..., 1] + xi[..., 2] - 1),
-                        4 * xi[..., 1],
-                        -4 * xi[..., 1],
-                        -4 * xi[..., 2],
-                        4 * xi[..., 2],
-                        zeros,
-                    ],
-                    dim=-1,
-                ),
-                torch.stack(
-                    [
-                        4 * (xi[..., 0] + xi[..., 1] + xi[..., 2]) - 3,
-                        zeros,
-                        4 * xi[..., 1] - 1,
-                        zeros,
-                        -4 * xi[..., 0],
-                        4 * xi[..., 0],
-                        -4 * (xi[..., 0] + 2 * xi[..., 1] + xi[..., 2] - 1),
-                        -4 * xi[..., 2],
-                        zeros,
-                        4 * xi[..., 2],
-                    ],
-                    dim=-1,
-                ),
-                torch.stack(
-                    [
-                        4 * (xi[..., 0] + xi[..., 1] + xi[..., 2]) - 3,
-                        zeros,
-                        zeros,
-                        4 * xi[..., 2] - 1,
-                        -4 * xi[..., 0],
-                        zeros,
-                        -4 * xi[..., 1],
-                        -4 * (xi[..., 0] + xi[..., 1] + 2 * xi[..., 2] - 1),
-                        4 * xi[..., 0],
-                        4 * xi[..., 1],
-                    ],
-                    dim=-1,
-                ),
-            ],
-            dim=xi.dim() - 1,
-        )
-
     @classproperty
     def iweights(cls) -> Tensor:
         return torch.tensor([0.041666667, 0.041666667, 0.041666667, 0.041666667])
@@ -849,6 +603,39 @@ class Hexa1(Element):
     iso_dim = 3
     nodes = 8
     meshio_type = "hexahedron"
+    facet_type = Quad1
+
+    @classproperty
+    def facets(cls) -> Tensor:
+        return torch.tensor(
+            [
+                [0, 3, 2, 1],
+                [4, 5, 6, 7],
+                [0, 1, 5, 4],
+                [1, 2, 6, 5],
+                [2, 3, 7, 6],
+                [3, 0, 4, 7],
+            ]
+        )
+
+    @classproperty
+    def edges(cls) -> Tensor:
+        return torch.tensor(
+            [
+                [0, 1],
+                [1, 2],
+                [2, 3],
+                [3, 0],
+                [4, 5],
+                [5, 6],
+                [6, 7],
+                [7, 4],
+                [0, 4],
+                [1, 5],
+                [2, 6],
+                [3, 7],
+            ]
+        )
 
     @classproperty
     def iso_coords(cls) -> Tensor:
@@ -892,53 +679,6 @@ class Hexa1(Element):
         N_8 = (1.0 - xi[..., 0]) * (1.0 + xi[..., 1]) * (1.0 + xi[..., 2])
         return 0.125 * torch.stack([N_1, N_2, N_3, N_4, N_5, N_6, N_7, N_8], dim=-1)
 
-    @classmethod
-    def B(cls, xi: Tensor) -> Tensor:
-        return 0.125 * torch.stack(
-            [
-                torch.stack(
-                    [
-                        -(1.0 - xi[..., 1]) * (1.0 - xi[..., 2]),
-                        (1.0 - xi[..., 1]) * (1.0 - xi[..., 2]),
-                        (1.0 + xi[..., 1]) * (1.0 - xi[..., 2]),
-                        -(1.0 + xi[..., 1]) * (1.0 - xi[..., 2]),
-                        -(1.0 - xi[..., 1]) * (1.0 + xi[..., 2]),
-                        (1.0 - xi[..., 1]) * (1.0 + xi[..., 2]),
-                        (1.0 + xi[..., 1]) * (1.0 + xi[..., 2]),
-                        -(1.0 + xi[..., 1]) * (1.0 + xi[..., 2]),
-                    ],
-                    dim=-1,
-                ),
-                torch.stack(
-                    [
-                        -(1.0 - xi[..., 0]) * (1.0 - xi[..., 2]),
-                        -(1.0 + xi[..., 0]) * (1.0 - xi[..., 2]),
-                        (1.0 + xi[..., 0]) * (1.0 - xi[..., 2]),
-                        (1.0 - xi[..., 0]) * (1.0 - xi[..., 2]),
-                        -(1.0 - xi[..., 0]) * (1.0 + xi[..., 2]),
-                        -(1.0 + xi[..., 0]) * (1.0 + xi[..., 2]),
-                        (1.0 + xi[..., 0]) * (1.0 + xi[..., 2]),
-                        (1.0 - xi[..., 0]) * (1.0 + xi[..., 2]),
-                    ],
-                    dim=-1,
-                ),
-                torch.stack(
-                    [
-                        -(1.0 - xi[..., 0]) * (1.0 - xi[..., 1]),
-                        -(1.0 + xi[..., 0]) * (1.0 - xi[..., 1]),
-                        -(1.0 + xi[..., 0]) * (1.0 + xi[..., 1]),
-                        -(1.0 - xi[..., 0]) * (1.0 + xi[..., 1]),
-                        (1.0 - xi[..., 0]) * (1.0 - xi[..., 1]),
-                        (1.0 + xi[..., 0]) * (1.0 - xi[..., 1]),
-                        (1.0 + xi[..., 0]) * (1.0 + xi[..., 1]),
-                        (1.0 - xi[..., 0]) * (1.0 + xi[..., 1]),
-                    ],
-                    dim=-1,
-                ),
-            ],
-            dim=xi.dim() - 1,
-        )
-
 
 class Hexa2(Hexa1):
     r"""Twenty-node quadratic serendipity hexahedral element.
@@ -961,6 +701,39 @@ class Hexa2(Hexa1):
     iso_dim = 3
     nodes = 20
     meshio_type = "hexahedron20"
+    facet_type = Quad2
+
+    @classproperty
+    def facets(cls) -> Tensor:
+        return torch.tensor(
+            [
+                [0, 3, 2, 1, 11, 10, 9, 8],
+                [4, 5, 6, 7, 12, 13, 14, 15],
+                [0, 1, 5, 4, 8, 17, 12, 16],
+                [1, 2, 6, 5, 9, 18, 13, 17],
+                [2, 3, 7, 6, 10, 19, 14, 18],
+                [3, 0, 4, 7, 11, 16, 15, 19],
+            ]
+        )
+
+    @classproperty
+    def edges(cls) -> Tensor:
+        return torch.tensor(
+            [
+                [0, 1, 8],
+                [1, 2, 9],
+                [2, 3, 10],
+                [3, 0, 11],
+                [4, 5, 12],
+                [5, 6, 13],
+                [6, 7, 14],
+                [7, 4, 15],
+                [0, 4, 16],
+                [1, 5, 17],
+                [2, 6, 18],
+                [3, 7, 19],
+            ]
+        )
 
     @classproperty
     def iso_coords(cls) -> Tensor:
@@ -1080,137 +853,6 @@ class Hexa2(Hexa1):
             dim=-1,
         )
 
-    @classmethod
-    def B(cls, xi: Tensor) -> Tensor:
-        return 0.125 * torch.stack(
-            [
-                torch.stack(
-                    [
-                        +(xi[..., 1] - 1)
-                        * (xi[..., 2] - 1)
-                        * (+2 * xi[..., 0] + xi[..., 1] + xi[..., 2] + 1),
-                        -(xi[..., 1] - 1)
-                        * (xi[..., 2] - 1)
-                        * (-2 * xi[..., 0] + xi[..., 1] + xi[..., 2] + 1),
-                        -(xi[..., 1] + 1)
-                        * (xi[..., 2] - 1)
-                        * (+2 * xi[..., 0] + xi[..., 1] - xi[..., 2] - 1),
-                        +(xi[..., 1] + 1)
-                        * (xi[..., 2] - 1)
-                        * (-2 * xi[..., 0] + xi[..., 1] - xi[..., 2] - 1),
-                        -(xi[..., 1] - 1)
-                        * (xi[..., 2] + 1)
-                        * (+2 * xi[..., 0] + xi[..., 1] - xi[..., 2] + 1),
-                        +(xi[..., 1] - 1)
-                        * (xi[..., 2] + 1)
-                        * (-2 * xi[..., 0] + xi[..., 1] - xi[..., 2] + 1),
-                        +(xi[..., 1] + 1)
-                        * (xi[..., 2] + 1)
-                        * (+2 * xi[..., 0] + xi[..., 1] + xi[..., 2] - 1),
-                        -(xi[..., 1] + 1)
-                        * (xi[..., 2] + 1)
-                        * (-2 * xi[..., 0] + xi[..., 1] + xi[..., 2] - 1),
-                        -4 * xi[..., 0] * (xi[..., 1] - 1) * (xi[..., 2] - 1),
-                        +2 * (xi[..., 1] ** 2 - 1) * (xi[..., 2] - 1),
-                        +4 * xi[..., 0] * (xi[..., 1] + 1) * (xi[..., 2] - 1),
-                        -2 * (xi[..., 1] ** 2 - 1) * (xi[..., 2] - 1),
-                        +4 * xi[..., 0] * (xi[..., 1] - 1) * (xi[..., 2] + 1),
-                        -2 * (xi[..., 1] ** 2 - 1) * (xi[..., 2] + 1),
-                        -4 * xi[..., 0] * (xi[..., 1] + 1) * (xi[..., 2] + 1),
-                        +2 * (xi[..., 1] ** 2 - 1) * (xi[..., 2] + 1),
-                        -2 * (xi[..., 1] - 1) * (xi[..., 2] ** 2 - 1),
-                        +2 * (xi[..., 1] - 1) * (xi[..., 2] ** 2 - 1),
-                        -2 * (xi[..., 1] + 1) * (xi[..., 2] ** 2 - 1),
-                        +2 * (xi[..., 1] + 1) * (xi[..., 2] ** 2 - 1),
-                    ],
-                    dim=-1,
-                ),
-                torch.stack(
-                    [
-                        +(xi[..., 0] - 1)
-                        * (xi[..., 2] - 1)
-                        * (xi[..., 0] + 2 * xi[..., 1] + xi[..., 2] + 1),
-                        +(xi[..., 0] + 1)
-                        * (xi[..., 2] - 1)
-                        * (xi[..., 0] - 2 * xi[..., 1] - xi[..., 2] - 1),
-                        -(xi[..., 0] + 1)
-                        * (xi[..., 2] - 1)
-                        * (xi[..., 0] + 2 * xi[..., 1] - xi[..., 2] - 1),
-                        -(xi[..., 0] - 1)
-                        * (xi[..., 2] - 1)
-                        * (xi[..., 0] - 2 * xi[..., 1] + xi[..., 2] + 1),
-                        -(xi[..., 0] - 1)
-                        * (xi[..., 2] + 1)
-                        * (xi[..., 0] + 2 * xi[..., 1] - xi[..., 2] + 1),
-                        -(xi[..., 0] + 1)
-                        * (xi[..., 2] + 1)
-                        * (xi[..., 0] - 2 * xi[..., 1] + xi[..., 2] - 1),
-                        +(xi[..., 0] + 1)
-                        * (xi[..., 2] + 1)
-                        * (xi[..., 0] + 2 * xi[..., 1] + xi[..., 2] - 1),
-                        +(xi[..., 0] - 1)
-                        * (xi[..., 2] + 1)
-                        * (xi[..., 0] - 2 * xi[..., 1] - xi[..., 2] + 1),
-                        -2 * (xi[..., 0] ** 2 - 1) * (xi[..., 2] - 1),
-                        +4 * xi[..., 1] * (xi[..., 0] + 1) * (xi[..., 2] - 1),
-                        +2 * (xi[..., 0] ** 2 - 1) * (xi[..., 2] - 1),
-                        -4 * xi[..., 1] * (xi[..., 0] - 1) * (xi[..., 2] - 1),
-                        +2 * (xi[..., 0] ** 2 - 1) * (xi[..., 2] + 1),
-                        -4 * xi[..., 1] * (xi[..., 0] + 1) * (xi[..., 2] + 1),
-                        -2 * (xi[..., 0] ** 2 - 1) * (xi[..., 2] + 1),
-                        +4 * xi[..., 1] * (xi[..., 0] - 1) * (xi[..., 2] + 1),
-                        -2 * (xi[..., 0] - 1) * (xi[..., 2] ** 2 - 1),
-                        +2 * (xi[..., 0] + 1) * (xi[..., 2] ** 2 - 1),
-                        -2 * (xi[..., 0] + 1) * (xi[..., 2] ** 2 - 1),
-                        +2 * (xi[..., 0] - 1) * (xi[..., 2] ** 2 - 1),
-                    ],
-                    dim=-1,
-                ),
-                torch.stack(
-                    [
-                        +(xi[..., 0] - 1)
-                        * (xi[..., 1] - 1)
-                        * (xi[..., 0] + xi[..., 1] + 2 * xi[..., 2] + 1),
-                        +(xi[..., 0] + 1)
-                        * (xi[..., 1] - 1)
-                        * (xi[..., 0] - xi[..., 1] - 2 * xi[..., 2] - 1),
-                        -(xi[..., 0] + 1)
-                        * (xi[..., 1] + 1)
-                        * (xi[..., 0] + xi[..., 1] - 2 * xi[..., 2] - 1),
-                        -(xi[..., 0] - 1)
-                        * (xi[..., 1] + 1)
-                        * (xi[..., 0] - xi[..., 1] + 2 * xi[..., 2] + 1),
-                        -(xi[..., 0] - 1)
-                        * (xi[..., 1] - 1)
-                        * (xi[..., 0] + xi[..., 1] - 2 * xi[..., 2] + 1),
-                        -(xi[..., 0] + 1)
-                        * (xi[..., 1] - 1)
-                        * (xi[..., 0] - xi[..., 1] + 2 * xi[..., 2] - 1),
-                        +(xi[..., 0] + 1)
-                        * (xi[..., 1] + 1)
-                        * (xi[..., 0] + xi[..., 1] + 2 * xi[..., 2] - 1),
-                        +(xi[..., 0] - 1)
-                        * (xi[..., 1] + 1)
-                        * (xi[..., 0] - xi[..., 1] - 2 * xi[..., 2] + 1),
-                        -2 * (xi[..., 0] ** 2 - 1) * (xi[..., 1] - 1),
-                        +2 * (xi[..., 0] + 1) * (xi[..., 1] ** 2 - 1),
-                        +2 * (xi[..., 0] ** 2 - 1) * (xi[..., 1] + 1),
-                        -2 * (xi[..., 0] - 1) * (xi[..., 1] ** 2 - 1),
-                        +2 * (xi[..., 0] ** 2 - 1) * (xi[..., 1] - 1),
-                        -2 * (xi[..., 0] + 1) * (xi[..., 1] ** 2 - 1),
-                        -2 * (xi[..., 0] ** 2 - 1) * (xi[..., 1] + 1),
-                        +2 * (xi[..., 0] - 1) * (xi[..., 1] ** 2 - 1),
-                        -4 * (xi[..., 0] - 1) * (xi[..., 1] - 1) * xi[..., 2],
-                        +4 * (xi[..., 0] + 1) * (xi[..., 1] - 1) * xi[..., 2],
-                        -4 * (xi[..., 0] + 1) * (xi[..., 1] + 1) * xi[..., 2],
-                        +4 * (xi[..., 0] - 1) * (xi[..., 1] + 1) * xi[..., 2],
-                    ],
-                    dim=-1,
-                ),
-            ],
-            dim=xi.dim() - 1,
-        )
-
     @classproperty
     def iweights(cls) -> Tensor:
         return torch.tensor(
@@ -1235,6 +877,35 @@ class Hexa2(Hexa1):
                 for xi_2 in [-1.0, 1.0]
                 for xi_1 in [-1.0, 1.0]
             ]
+        )
+
+
+def linear_etype(nodes: Tensor, elements: Tensor) -> type[Element]:
+    """Infer the linear element type from a mesh.
+
+    Args:
+        nodes (Tensor): Nodal coordinates.
+            *Shape:* `(n_nodes, dim)`.
+        elements (Tensor): Connectivity of linear elements.
+            *Shape:* `(n_elem, n_nodes_per_elem)`.
+
+    Returns:
+        etype (type[Element]): The matching linear element type.
+    """
+    n_nod, dim = elements.shape[1], nodes.shape[1]
+    if n_nod == 2:
+        return Bar1
+    elif n_nod == 3 and dim == 2:
+        return Tria1
+    elif n_nod == 4 and dim == 2:
+        return Quad1
+    elif n_nod == 4 and dim == 3:
+        return Tetra1
+    elif n_nod == 8 and dim == 3:
+        return Hexa1
+    else:
+        raise ValueError(
+            "The element type is not supported. Maybe the element is already quadratic?"
         )
 
 
@@ -1263,42 +934,7 @@ def linear_to_quadratic(nodes: Tensor, elements: Tensor) -> tuple[Tensor, Tensor
         new_elements (Tensor): Quadratic element connectivity.
             *Shape:* `(n_elem, n_quadratic_nodes_per_elem)`.
     """
-
-    if elements.shape[1] == 2:
-        # Bar1 element
-        edges = torch.tensor([[0, 1]])
-    elif elements.shape[1] == 3 and nodes.shape[1] == 2:
-        # Tri1 element
-        edges = torch.tensor([[0, 1], [1, 2], [2, 0]])
-    elif elements.shape[1] == 4 and nodes.shape[1] == 2:
-        # Quad1 element
-        edges = torch.tensor([[0, 1], [1, 2], [2, 3], [3, 0]])
-    elif elements.shape[1] == 4 and nodes.shape[1] == 3:
-        # Tetra1 element
-        edges = torch.tensor([[0, 1], [1, 2], [0, 2], [3, 0], [1, 3], [2, 3]])
-    elif elements.shape[1] == 8 and nodes.shape[1] == 3:
-        # Hexa1 element
-        edges = torch.tensor(
-            [
-                [0, 1],
-                [1, 2],
-                [2, 3],
-                [3, 0],
-                [4, 5],
-                [5, 6],
-                [6, 7],
-                [7, 4],
-                [0, 4],
-                [1, 5],
-                [2, 6],
-                [3, 7],
-            ]
-        )
-    else:
-        raise Exception(
-            "The element type is not supported for conversion to quadratic."
-            "Maybe the element is already quadratic?"
-        )
+    edges = linear_etype(nodes, elements).edges
 
     # Vectorize edges for all elements and sort each pair with increasing node IDs
     edge_vector = elements[:, edges].reshape(-1, 2)

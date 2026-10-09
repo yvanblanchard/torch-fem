@@ -1,0 +1,648 @@
+"""Model-level tests exercising every supported element type."""
+
+import math
+
+import pytest
+import torch
+
+from torchfem import Laminate, Planar, Shell, ShellHeat, Solid, Truss, TrussHeat
+from torchfem.elements import linear_to_quadratic
+from torchfem.materials import (
+    HyperelasticPlaneStress,
+    IsotropicConductivity1D,
+    IsotropicConductivity2D,
+    IsotropicDamage3D,
+    IsotropicDamagePlaneStrain,
+    IsotropicDamagePlaneStress,
+    IsotropicElasticity1D,
+    IsotropicElasticity3D,
+    IsotropicElasticityPlaneStress,
+    OrthotropicConductivity2D,
+    OrthotropicElasticityPlaneStress,
+)
+from torchfem.mesh import cube_hexa, cube_tetra, rect_quad, rect_tri
+from torchfem.rotations import axis_rotation
+
+ETYPES = ["Tria1", "Tria2", "Quad1", "Quad2", "Tetra1", "Tetra2", "Hexa1", "Hexa2"]
+
+# Gradients of a linear displacement field, which any conforming element
+# reproduces exactly.
+GRADIENT_2D = torch.tensor([[1.0e-3, 2.0e-4], [3.0e-4, -1.0e-3]])
+GRADIENT_3D = torch.tensor(
+    [[1.0e-3, 2.0e-4, -1.0e-4], [3.0e-4, -1.0e-3, 5.0e-5], [1.0e-4, 2.0e-4, 7.0e-4]]
+)
+
+
+def _build(etype: str) -> Planar | Solid:
+    """Build the model whose connectivity selects `etype`."""
+    planar = IsotropicElasticityPlaneStress(1000.0, 0.3)
+    solid = IsotropicElasticity3D(1000.0, 0.3)
+    cases = {
+        "Tria1": (rect_tri(4, 4), Planar, planar, False),
+        "Tria2": (rect_tri(4, 4), Planar, planar, True),
+        "Quad1": (rect_quad(4, 4), Planar, planar, False),
+        "Quad2": (rect_quad(4, 4), Planar, planar, True),
+        "Tetra1": (cube_tetra(3, 3, 3), Solid, solid, False),
+        "Tetra2": (cube_tetra(3, 3, 3), Solid, solid, True),
+        "Hexa1": (cube_hexa(3, 3, 3), Solid, solid, False),
+        "Hexa2": (cube_hexa(3, 3, 3), Solid, solid, True),
+    }
+    mesh, model, material, quadratic = cases[etype]
+    nodes, elements = linear_to_quadratic(*mesh) if quadratic else mesh
+    return model(nodes, elements, material)
+
+
+def _on_boundary(nodes: torch.Tensor) -> torch.Tensor:
+    """Mask of nodes on any face of the bounding box."""
+    mask = torch.zeros(len(nodes), dtype=torch.bool)
+    for dim in range(nodes.shape[1]):
+        coord = nodes[:, dim]
+        mask |= torch.isclose(coord, coord.min()) | torch.isclose(coord, coord.max())
+    return mask
+
+
+class TestPlanarDamageAgainstSolid:
+    """One layer of hexes with a vanishing out-of-plane strain is plane strain."""
+
+    EPS_0, D_MAX, U_TOP = 8.0e-4, 0.3, 0.05
+
+    def _law(self):
+        def d(kappa, cl):
+            return self.D_MAX * torch.clamp((kappa - self.EPS_0) / self.EPS_0, 0.0, 1.0)
+
+        def d_prime(kappa, cl):
+            inside = (kappa > self.EPS_0) & (kappa < 2 * self.EPS_0)
+            return torch.where(
+                inside, torch.full_like(kappa, self.D_MAX / self.EPS_0), 0.0 * kappa
+            )
+
+        return d, d_prime
+
+    def test_planar_plane_stress_approximates_the_free_surface_solid(self):
+        """A free out-of-plane face enforces sigma_33 = 0 only weakly across one
+        linear element, so the agreement is close rather than exact."""
+        d, d_prime = self._law()
+        t = 0.1  # thin, since plane stress is the thin-plate limit
+        nodes, elements = cube_hexa(7, 7, 2, 10.0, 10.0, t)
+
+        solid = Solid(
+            nodes, elements, IsotropicDamage3D(6000.0, 0.3, d, d_prime, "rankine")
+        )
+        n = solid.nodes
+        solid.constraints[n[:, 1] <= 1e-9, 1] = True
+        solid.constraints[n[:, 0] <= 1e-9, 0] = True
+        solid.constraints[n[:, 2] <= 1e-9, 2] = True  # z = 0 held, far face free
+        top = (n[:, 1] >= 10.0 - 1e-9) & (n[:, 0] <= 5.0)
+        solid.constraints[top, 1] = True
+        solid.displacements[top, 1] = self.U_TOP
+
+        keep = nodes[:, 2] <= 1e-9
+        remap = torch.full((len(nodes),), -1, dtype=torch.int64)
+        remap[keep] = torch.arange(int(keep.sum()))
+        planar = Planar(
+            nodes[keep][:, :2],
+            remap[elements[:, :4]],
+            IsotropicDamagePlaneStress(6000.0, 0.3, d, d_prime, "rankine"),
+            thickness=t,
+        )
+        m = planar.nodes
+        planar.constraints[m[:, 1] <= 1e-9, 1] = True
+        planar.constraints[m[:, 0] <= 1e-9, 0] = True
+        top2 = (m[:, 1] >= 10.0 - 1e-9) & (m[:, 0] <= 5.0)
+        planar.constraints[top2, 1] = True
+        planar.displacements[top2, 1] = self.U_TOP
+
+        increments = torch.linspace(0.0, 1.0, 10)
+        us, _, _, _, state_s = solid.solve(increments=increments)
+        up, _, _, _, state_p = planar.solve(increments=increments)
+
+        assert state_p[..., 1].max() > 0.0
+        rel = (us[keep][:, :2] - up).abs().max() / up.abs().max()
+        assert rel < 3e-3, rel
+        assert abs(state_s[..., 1].max() - state_p[..., 1].max()) < 1e-3
+
+    def test_planar_reproduces_the_solid_solution(self):
+        d, d_prime = self._law()
+        nodes, elements = cube_hexa(7, 7, 2, 10.0, 10.0, 1.0)
+
+        solid = Solid(
+            nodes, elements, IsotropicDamage3D(6000.0, 0.3, d, d_prime, "rankine")
+        )
+        n = solid.nodes
+        solid.constraints[n[:, 1] <= 1e-9, 1] = True
+        solid.constraints[n[:, 0] <= 1e-9, 0] = True
+        solid.constraints[:, 2] = True  # eps_zz = 0 makes this exactly plane strain
+        top = (n[:, 1] >= 10.0 - 1e-9) & (n[:, 0] <= 5.0)  # partial, for a gradient
+        solid.constraints[top, 1] = True
+        solid.displacements[top, 1] = self.U_TOP
+
+        keep = nodes[:, 2] <= 1e-9
+        assert torch.allclose(nodes[elements][:, :4, 2], torch.zeros(1))  # bottom face
+        remap = torch.full((len(nodes),), -1, dtype=torch.int64)
+        remap[keep] = torch.arange(int(keep.sum()))
+        planar = Planar(
+            nodes[keep][:, :2],
+            remap[elements[:, :4]],
+            IsotropicDamagePlaneStrain(6000.0, 0.3, d, d_prime, "rankine"),
+        )
+        m = planar.nodes
+        planar.constraints[m[:, 1] <= 1e-9, 1] = True
+        planar.constraints[m[:, 0] <= 1e-9, 0] = True
+        top2 = (m[:, 1] >= 10.0 - 1e-9) & (m[:, 0] <= 5.0)
+        planar.constraints[top2, 1] = True
+        planar.displacements[top2, 1] = self.U_TOP
+
+        increments = torch.linspace(0.0, 1.0, 10)
+        us, _, _, _, state_s = solid.solve(increments=increments)
+        up, _, _, _, state_p = planar.solve(increments=increments)
+
+        assert state_p[..., 1].max() > 0.0  # damage is actually active
+        assert torch.allclose(us[keep][:, :2], up, atol=1e-10)
+        assert torch.allclose(state_s[..., 1], state_p[..., 1], atol=1e-10)
+
+
+class TestPatch:
+    @pytest.mark.parametrize("etype", ETYPES)
+    def test_reproduces_a_linear_displacement_field(self, etype):
+        """First-order patch test: prescribing a linear field on the boundary must
+        reproduce it exactly in the interior and give the same stress everywhere."""
+        model = _build(etype)
+        assert model.etype.__name__ == etype
+
+        gradient = GRADIENT_2D if model.n_dim == 2 else GRADIENT_3D
+        u_exact = model.nodes @ gradient.T
+        model.constraints = _on_boundary(model.nodes)[:, None].repeat(
+            1, model.n_dof_per_node
+        )
+        model.displacements = u_exact
+
+        u, _, sigma, _, _ = model.solve()
+        assert torch.allclose(u, u_exact, atol=1e-12)
+        assert torch.allclose(sigma, sigma[0].expand_as(sigma), atol=1e-12)
+
+    @pytest.mark.parametrize("model", [Planar, Solid])
+    def test_rejects_unsupported_connectivity(self, model):
+        if model is Planar:
+            nodes, material = (
+                rect_quad(3, 3)[0],
+                IsotropicElasticityPlaneStress(1e3, 0.3),
+            )
+        else:
+            nodes, material = cube_hexa(2, 2, 2)[0], IsotropicElasticity3D(1e3, 0.3)
+        with pytest.raises(ValueError, match="not supported"):
+            _ = model(nodes, torch.tensor([[0, 1, 2, 3, 4]]), material).etype
+
+
+class TestThickness:
+    def test_planar_accepts_one_thickness_per_element(self):
+        nodes, elements = rect_quad(3, 3)
+        thickness = torch.linspace(0.5, 1.5, len(elements))
+        material = IsotropicElasticityPlaneStress(1000.0, 0.3)
+        model = Planar(nodes, elements, material, thickness=thickness)
+        assert torch.equal(model.thickness, thickness)
+
+    def test_shell_accepts_one_thickness_per_element(self):
+        nodes = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        elements = torch.tensor([[0, 1, 2]])
+        material = IsotropicElasticityPlaneStress(1000.0, 0.3)
+        thickness = torch.tensor([0.2])
+        shell = Shell(nodes, elements, material, thickness=thickness)
+        assert torch.equal(shell.thickness, thickness)
+
+
+class TestShellValidation:
+    nodes = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    elements = torch.tensor([[0, 1, 2]])
+
+    def test_rejects_even_n_simpson(self):
+        material = IsotropicElasticityPlaneStress(1000.0, 0.3)
+        with pytest.raises(ValueError, match="odd integer"):
+            Shell(self.nodes, self.elements, material, n_simpson=4)
+
+    def test_requires_a_shear_modulus(self):
+        """An orthotropic material without transverse moduli defines no
+        transverse shear stiffness, and neither does `G_12`."""
+        material = OrthotropicElasticityPlaneStress(
+            E_1=100e3, E_2=10e3, nu_12=0.3, G_12=5e3
+        )
+        with pytest.raises(ValueError, match="shear modulus"):
+            Shell(self.nodes, self.elements, material)
+
+    def test_rejects_a_finite_strain_material(self):
+        ply = HyperelasticPlaneStress(lambda F, p: p[0] * torch.trace(F), [1.0])
+        for material in (ply, Laminate([ply], [1.0], [0.0])):
+            with pytest.raises(NotImplementedError, match="not implemented for Shell"):
+                Shell(self.nodes, self.elements, material)
+
+    def test_integrates_the_transverse_moduli_of_an_orthotropic_material(self):
+        material = OrthotropicElasticityPlaneStress(
+            E_1=100e3, E_2=10e3, nu_12=0.3, G_12=5e3, G_13=4.8e3, G_23=3e3
+        )
+        shell = Shell(self.nodes, self.elements, material, thickness=0.2)
+        expected = 0.2 * torch.tensor([[4.8e3, 0.0], [0.0, 3e3]])
+        assert torch.allclose(shell.As[0], expected)
+
+
+class TestShellTransverseShear:
+    """A narrow strip with `nu=0` is exactly a Timoshenko beam, so its tip
+    deflection checks the transverse shear stiffness away from the thin limit.
+    The shear stiffness used to carry a spurious factor of the element area,
+    which cancels only for thin shells and grows under mesh refinement."""
+
+    E, L, b, P, kappa = 1000.0, 10.0, 1.0, 1.0, 5.0 / 6.0
+
+    @pytest.mark.parametrize("t", [2.0, 0.5])
+    @pytest.mark.parametrize("etype", ["Tria1", "Quad1"])
+    def test_tip_deflection_matches_timoshenko(self, t, etype):
+        if etype == "Tria1":
+            nodes, elements = rect_tri(41, 3, self.L, self.b, variant="center")
+        else:
+            nodes, elements = rect_quad(41, 3, self.L, self.b)
+        nodes = torch.hstack([nodes, torch.zeros((len(nodes), 1))])
+        material = IsotropicElasticityPlaneStress(E=self.E, nu=0.0)
+        beam = Shell(nodes, elements, material, thickness=t)
+        tip = nodes[:, 0] > self.L - 1e-9
+        beam.forces[tip, 2] = self.P / int(tip.sum())
+        beam.constraints[nodes[:, 0] < 1e-9, :] = True
+        u, _, _, _, _ = beam.solve(method="direct")
+
+        bending = self.P * self.L**3 / (3 * self.E * self.b * t**3 / 12)
+        shear = self.P * self.L / (self.kappa * (self.E / 2) * self.b * t)
+        assert u[:, 2].abs().max() == pytest.approx(bending + shear, rel=0.01)
+
+
+def _clamped_plate(n: int, t: float, E: float = 1.0e6, nu: float = 0.3, q: float = 1.0):
+    """Uniformly loaded square plate, clamped all round, on an `n` by `n` quad mesh."""
+    nodes, elements = rect_quad(n + 1, n + 1)
+    nodes = torch.hstack([nodes, torch.zeros((len(nodes), 1))])
+    material = IsotropicElasticityPlaneStress(E=E, nu=nu)
+    plate = Shell(nodes, elements, material, thickness=t)
+    surface = torch.ones(plate.n_nod, dtype=torch.bool)
+    load = torch.tensor([0.0, 0.0, q])
+    plate.forces[:, 0:3] = plate.integrate_surface_load(surface, load)
+    edge = ((nodes[:, :2] < 1e-9) | (nodes[:, :2] > 1.0 - 1e-9)).any(dim=1)
+    plate.constraints[edge, :] = True
+    plate.constraints[:, [0, 1, 5]] = True
+    u, _, _, _, _ = plate.solve(method="direct")
+    # Normalized on the thin-plate deflection 0.00126 q L^4 / D of Timoshenko
+    D = E * t**3 / (12 * (1 - nu**2))
+    return float(u[:, 2].max()) / (0.00126 * q / D)
+
+
+class TestShellQuadrilateral:
+    """The MITC4 quadrilateral ties its transverse shear strains to the element
+    edges, which keeps a thin plate from locking. A plain bilinear quadrilateral
+    returns a deflection near zero in the same test."""
+
+    # Distorted patch, so the tests below do not sit on a regular mesh
+    nodes = torch.tensor(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.31, 0.24, 0.0],
+            [0.72, 0.33, 0.0],
+            [0.66, 0.71, 0.0],
+            [0.28, 0.63, 0.0],
+        ]
+    )
+    elements = torch.tensor([[0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]])
+    material = IsotropicElasticityPlaneStress(1000.0, 0.3)
+
+    @pytest.mark.parametrize("t", [1.0e-2, 1.0e-3, 1.0e-4])
+    def test_thin_plate_does_not_lock(self, t):
+        """The deflection stays at the thin-plate limit however thin the plate is."""
+        assert _clamped_plate(16, t) == pytest.approx(1.0, rel=0.01)
+
+    def test_plate_converges_under_refinement(self):
+        coarse, fine = _clamped_plate(4, 1.0e-3), _clamped_plate(16, 1.0e-3)
+        assert abs(fine - 1.0) < abs(coarse - 1.0)
+
+    def test_reproduces_a_linear_displacement_field(self):
+        """Membrane patch test: a uniform strain is integrated exactly."""
+        eps = 1.0e-3
+        patch = Shell(self.nodes, self.elements, self.material, thickness=0.1)
+        patch.constraints[:] = True
+        patch.displacements[:, 0] = eps * self.nodes[:, 0]
+        patch.displacements[:, 1] = -0.3 * eps * self.nodes[:, 1]
+        _, _, sigma, _, _ = patch.solve(method="direct")
+        assert sigma[..., 0, 0] == pytest.approx(1000.0 * eps, abs=1e-12)
+        assert sigma[..., 1, 1] == pytest.approx(0.0, abs=1e-12)
+        assert sigma[..., 0, 1] == pytest.approx(0.0, abs=1e-12)
+
+    def test_reproduces_a_constant_curvature(self):
+        """Bending patch test: a uniform curvature is integrated exactly."""
+        t, c, nu = 0.1, 1.0e-4, 0.3
+        patch = Shell(self.nodes, self.elements, self.material, thickness=t)
+        patch.constraints[:] = True
+        patch.displacements[:, 2] = (
+            c / 2 * (self.nodes[:, 0] ** 2 + self.nodes[:, 1] ** 2)
+        )
+        patch.displacements[:, 3] = -c * self.nodes[:, 1]
+        patch.displacements[:, 4] = c * self.nodes[:, 0]
+        _, _, sigma, _, _ = patch.solve(
+            method="direct", aggregate_integration_points=False
+        )
+        # Integration points run over the in-plane points and the Simpson stations
+        outer = sigma.reshape(-1, patch.n_z, patch.n_elem, 2, 2)[:, -1]
+        expected = 1000.0 / (1 - nu**2) * (1 + nu) * c * t / 2
+        assert outer[..., 0, 0] == pytest.approx(expected, abs=1e-12)
+        assert outer[..., 0, 1] == pytest.approx(0.0, abs=1e-12)
+
+    def test_has_no_spurious_zero_energy_modes(self):
+        """Six rigid body modes and one drilling mode per node, and nothing else."""
+        corners = torch.tensor(
+            [[0.0, 0.0, 0.0], [1.2, 0.1, 0.0], [0.9, 1.3, 0.0], [-0.1, 0.8, 0.0]]
+        )
+        element = Shell(
+            corners, torch.tensor([[0, 1, 2, 3]]), self.material, drill_penalty=0.0
+        )
+        eigenvalues = torch.linalg.eigvalsh(element.k0()[0])
+        zero = eigenvalues < 1e-9 * eigenvalues.max()
+        assert int(zero.sum()) == 6 + 4
+
+    def test_rejects_an_unsupported_element(self):
+        nodes = torch.zeros(5, 3)
+        with pytest.raises(ValueError, match="Element type not supported"):
+            Shell(nodes, torch.tensor([[0, 1, 2, 3, 4]]), self.material)
+
+
+class TestShellDrilling:
+    """The drilling rotation only enters the response where element normals differ,
+    so a curved shell is the only place it shows. Every other shell test here is
+    flat, where it decouples and the penalty has no effect at all."""
+
+    @pytest.mark.parametrize("tri", [False, True])
+    def test_pinched_hemisphere(self, tri):
+        """Hemisphere with an 18° hole pulled apart by two pairs of opposed radial
+        loads (MacNeal and Harder), meshed by wrapping a unit square onto the sphere.
+        The deformation is nearly inextensional, so a penalty resisting a rigid
+        rotation locks it well below the reference deflection of 0.0940."""
+        n, R, t, E, nu = 8, 10.0, 0.04, 6.825e7, 0.3
+        grid, elements = rect_tri(n + 1, n + 1) if tri else rect_quad(n + 1, n + 1)
+        phi, theta = math.radians(72.0) * grid[:, 0], math.pi / 2 * grid[:, 1]
+        nodes = R * torch.stack(
+            [phi.cos() * theta.cos(), phi.cos() * theta.sin(), phi.sin()], dim=1
+        )
+        material = IsotropicElasticityPlaneStress(E=E, nu=nu)
+        model = Shell(nodes, elements, material, thickness=t)
+        x, y, z = nodes.T
+
+        # Symmetry on the two cut planes, one node pinned against rigid translation
+        sym_x, sym_y = x.abs() < 1e-9, y.abs() < 1e-9
+        model.constraints[sym_y, 1] = model.constraints[sym_y, 3] = True
+        model.constraints[sym_x, 0] = model.constraints[sym_x, 4] = True
+        model.constraints[sym_x | sym_y, 5] = True
+
+        # Opposed radial loads at the equator, outward on x and inward on y
+        equator = z.abs() < 1e-9
+        outward = int(torch.argmax((equator & sym_y).double()))
+        inward = int(torch.argmax((equator & sym_x).double()))
+        model.constraints[outward, 2] = True
+        model.forces[outward, 0] = 1.0
+        model.forces[inward, 1] = -1.0
+
+        u, *_ = model.solve(method="direct")
+        assert u[outward, 0].item() / 0.0940 == pytest.approx(1.0, rel=0.03)
+
+    @pytest.mark.parametrize("n", [4, 3])
+    def test_a_rigid_rotation_carries_no_energy(self, n):
+        """The penalty ties the drilling rotation to the in-plane rotation of the
+        membrane field rather than to zero, so a tilted element does not resist the
+        drilling a rigid rotation leaves on it."""
+        # Planar but tilted, so a rotation about z drills the element
+        nodes = torch.tensor(
+            [[0.0, 0.0, 0.0], [1.2, 0.0, 0.36], [1.1, 1.3, 0.33], [0.0, 0.8, 0.0]]
+        )[:n]
+        material = IsotropicElasticityPlaneStress(1000.0, 0.3)
+        element = Shell(nodes, torch.arange(n)[None], material, thickness=0.1)
+        axis = torch.tensor([0.2, -0.4, 1.0])
+        v = torch.zeros(n, 6)
+        v[:, 0:3] = torch.linalg.cross(axis.expand(n, 3), nodes)
+        v[:, 3:6] = axis
+        k, v = element.k0()[0], v.reshape(-1)
+        assert v @ k @ v / (v @ v) < 1e-9 * torch.linalg.eigvalsh(k).max()
+
+
+def _shell(elements):
+    nodes = torch.tensor(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]]
+    )
+    material = IsotropicElasticityPlaneStress(1000.0, 0.3)
+    return Shell(nodes, torch.tensor(elements), material, thickness=0.1)
+
+
+# One model per `__repr__`, since each looks the element type up the same way and
+# the metaclass shows through whatever element it holds.
+@pytest.mark.parametrize(
+    "build, etype",
+    [
+        (lambda: _build("Quad1"), "Quad1"),
+        (lambda: _build("Hexa1"), "Hexa1"),
+        (lambda: _shell([[0, 1, 2]]), "Tria1"),
+        (
+            lambda: Truss(
+                torch.tensor([[0.0, 0.0], [1.0, 0.0]]),
+                torch.tensor([[0, 1]]),
+                IsotropicElasticity1D(1000.0),
+            ),
+            "Bar1",
+        ),
+    ],
+    ids=["planar", "solid", "shell", "truss"],
+)
+def test_repr_names_the_element_type_not_its_metaclass(build, etype):
+    assert etype in repr(build())
+
+
+class TestShellHeat:
+    """In-plane conduction through a strip, where the section of thickness `t`
+    carries a conductance `kappa * W * t / L` that a 1D solution reproduces."""
+
+    L, W, t, kappa, dT = 4.0, 1.0, 0.3, 5.0, 100.0
+
+    def _strip(self, material=None, thickness=None, orientation=None, rotation=None):
+        """A strip along x, held cold at x = 0 and hot at x = L."""
+        nodes, elements = rect_quad(9, 3, self.L, self.W)
+        nodes = torch.hstack([nodes, torch.zeros(len(nodes), 1)])
+        axis = nodes[:, 0].clone()
+        direction = (
+            torch.tensor([1.0, 0.0, 0.0]) if orientation is None else orientation
+        )
+        if rotation is not None:
+            nodes, direction = nodes @ rotation.T, direction @ rotation.T
+        strip = ShellHeat(
+            nodes,
+            elements,
+            IsotropicConductivity2D(kappa=self.kappa) if material is None else material,
+            thickness=self.t if thickness is None else thickness,
+            orientation=direction,
+        )
+        hot, cold = axis > self.L - 1e-9, axis < 1e-9
+        strip.constraints[hot | cold] = True
+        strip.temperatures[hot] = self.dT
+        return strip, axis, hot
+
+    def test_temperature_is_linear_along_the_strip(self):
+        strip, axis, _ = self._strip()
+        temperature = strip.solve(method="direct")[0]
+        assert torch.allclose(temperature[:, 0], self.dT * axis / self.L, atol=1e-9)
+
+    def test_heat_flow_matches_the_one_dimensional_solution(self):
+        strip, _, hot = self._strip()
+        flux = strip.solve(method="direct")[1]
+        expected = self.kappa * self.W * self.t * self.dT / self.L
+        assert float(flux[hot, 0].sum()) == pytest.approx(expected)
+
+    @pytest.mark.parametrize("thickness", [0.15, 0.3, 0.6])
+    def test_thickness_scales_the_conductance(self, thickness):
+        strip, _, hot = self._strip(thickness=thickness)
+        flux = strip.solve(method="direct")[1]
+        expected = self.kappa * self.W * thickness * self.dT / self.L
+        assert float(flux[hot, 0].sum()) == pytest.approx(expected)
+
+    @pytest.mark.parametrize(
+        ("direction", "conductivity"),
+        [([1.0, 0.0, 0.0], 50.0), ([0.0, 1.0, 0.0], 2.0)],
+        ids=["along", "across"],
+    )
+    def test_orthotropic_conductivity_follows_the_orientation(
+        self, direction, conductivity
+    ):
+        material = OrthotropicConductivity2D(kappa_1=50.0, kappa_2=2.0)
+        strip, _, hot = self._strip(material, orientation=torch.tensor(direction))
+        flux = strip.solve(method="direct")[1]
+        expected = conductivity * self.W * self.t * self.dT / self.L
+        assert float(flux[hot, 0].sum()) == pytest.approx(expected)
+
+    def test_a_rigid_rotation_leaves_the_local_solution_unchanged(self):
+        # The flux comes back in the local material frame, so it is invariant
+        # while the frame itself rotates with the model.
+        rotation = axis_rotation(torch.tensor([0.3, -0.7, 0.5]), torch.tensor(1.1))
+        flat, _, _ = self._strip()
+        turned, _, _ = self._strip(rotation=rotation)
+        for plane, rotated in zip(
+            flat.solve(method="direct"), turned.solve(method="direct")
+        ):
+            assert torch.allclose(plane, rotated, atol=1e-9)
+
+    def test_conduction_follows_a_curved_surface(self):
+        # Flat facets conduct along the polygon through the nodes, not the chord
+        # between its ends.
+        n, radius, width = 17, 2.0, 1.0
+        angle = torch.linspace(0.0, math.pi / 2, n)
+        arc = radius * torch.stack([torch.cos(angle), torch.sin(angle)], dim=1)
+        nodes = torch.cat(
+            [torch.hstack([arc, torch.full((n, 1), z)]) for z in (0.0, width)]
+        )
+        elements = torch.tensor([[i, i + 1, n + i + 1, n + i] for i in range(n - 1)])
+        shell = ShellHeat(
+            nodes, elements, IsotropicConductivity2D(kappa=self.kappa), thickness=self.t
+        )
+        ends = torch.zeros(2 * n, dtype=torch.bool)
+        ends[[0, n - 1, n, 2 * n - 1]] = True
+        shell.constraints[ends] = True
+        shell.temperatures[[n - 1, 2 * n - 1]] = self.dT
+        flux = shell.solve(method="direct")[1]
+
+        path = float((arc[1:] - arc[:-1]).norm(dim=1).sum())
+        expected = self.kappa * width * self.t * self.dT / path
+        assert float(flux[[n - 1, 2 * n - 1], 0].sum()) == pytest.approx(expected)
+
+    def test_capacity_matrix_integrates_density_over_the_section(self):
+        density = 2.0
+        strip, _, _ = self._strip(
+            IsotropicConductivity2D(kappa=self.kappa, rho=density)
+        )
+        total = density * self.L * self.W * self.t
+        assert float(strip.integrate_mass().sum()) == pytest.approx(total)
+
+    def test_transient_relaxes_to_the_steady_solution(self):
+        strip, axis, _ = self._strip(IsotropicConductivity2D(kappa=self.kappa, rho=2.0))
+        temperature = strip.time_integration(
+            t_output=torch.tensor([0.0, 100.0]), delta_t=0.5
+        )[0]
+        steady = self.dT * axis / self.L
+        assert torch.allclose(temperature[-1, :, 0], steady, atol=1e-4)
+
+
+class TestTrussHeat:
+    """A bar conducts along its axis alone, with a conductance `kappa * A / L`."""
+
+    L, A, kappa, dT = 3.0, 0.25, 45.0, 100.0
+
+    def _chain(self, n: int = 6, area: float | None = None):
+        """A straight chain of bars, held cold at one end and hot at the other."""
+        x = torch.linspace(0.0, self.L, n)
+        nodes = torch.stack([x, torch.zeros(n)], dim=1)
+        elements = torch.tensor([[i, i + 1] for i in range(n - 1)])
+        chain = TrussHeat(nodes, elements, IsotropicConductivity1D(kappa=self.kappa))
+        chain.areas = torch.full((n - 1,), self.A if area is None else area)
+        chain.constraints[[0, n - 1]] = True
+        chain.temperatures[n - 1, 0] = self.dT
+        return chain, x
+
+    def test_temperature_is_linear_along_the_chain(self):
+        chain, x = self._chain()
+        temperature = chain.solve(method="direct")[0]
+        assert torch.allclose(temperature[:, 0], self.dT * x / self.L)
+
+    def test_heat_flow_matches_the_one_dimensional_solution(self):
+        chain, _ = self._chain()
+        flux = chain.solve(method="direct")[1]
+        expected = self.kappa * self.A * self.dT / self.L
+        assert float(flux[-1]) == pytest.approx(expected)
+
+    @pytest.mark.parametrize("area", [0.125, 0.25, 0.5])
+    def test_area_scales_the_conductance(self, area):
+        chain, _ = self._chain(area=area)
+        flux = chain.solve(method="direct")[1]
+        expected = self.kappa * area * self.dT / self.L
+        assert float(flux[-1]) == pytest.approx(expected)
+
+    def test_a_bar_conducts_along_its_axis_in_three_dimensions(self):
+        # The joint temperature splits by the two bar lengths alone, whatever
+        # direction they point in.
+        nodes = torch.tensor([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [2.0, 0.0, 0.5]])
+        elements = torch.tensor([[0, 1], [1, 2]])
+        bars = TrussHeat(nodes, elements, IsotropicConductivity1D(kappa=self.kappa))
+        bars.constraints[[0, 2]] = True
+        bars.temperatures[2, 0] = self.dT
+        temperature = bars.solve(method="direct")[0]
+
+        first = float((nodes[1] - nodes[0]).norm())
+        second = float((nodes[2] - nodes[1]).norm())
+        assert float(temperature[1, 0]) == pytest.approx(
+            self.dT * first / (first + second)
+        )
+
+    def test_parallel_bars_carry_heat_in_proportion_to_their_area(self):
+        nodes = torch.tensor([[0.0, 0.0], [1.0, 1.0], [1.0, -1.0], [2.0, 0.0]])
+        elements = torch.tensor([[0, 1], [1, 3], [0, 2], [2, 3]])
+        paths = TrussHeat(nodes, elements, IsotropicConductivity1D(kappa=self.kappa))
+        paths.areas = torch.tensor([1.0, 1.0, 3.0, 3.0])
+        paths.constraints[[0, 3]] = True
+        paths.temperatures[3, 0] = self.dT
+        temperature, reaction, flux, _, _ = paths.solve(method="direct")
+
+        # Equal length and conductivity, so the flux matches and the power, which
+        # carries the area, splits three to one
+        assert float(flux[2]) == pytest.approx(float(flux[0]))
+        assert float(temperature[1, 0]) == pytest.approx(0.5 * self.dT)
+        assert float(reaction[3]) == pytest.approx(
+            4.0 * self.kappa * self.dT / (2.0 * float(2.0**0.5))
+        )
+
+    def test_transient_relaxes_to_the_steady_solution(self):
+        x = torch.linspace(0.0, self.L, 6)
+        nodes = torch.stack([x, torch.zeros(6)], dim=1)
+        elements = torch.tensor([[i, i + 1] for i in range(5)])
+        material = IsotropicConductivity1D(kappa=self.kappa, rho=2.0)
+        chain = TrussHeat(nodes, elements, material)
+        chain.constraints[[0, 5]] = True
+        chain.temperatures[5, 0] = self.dT
+        temperature = chain.time_integration(
+            t_output=torch.tensor([0.0, 20.0]), delta_t=0.05
+        )[0]
+        assert torch.allclose(temperature[-1, :, 0], self.dT * x / self.L, atol=1e-5)

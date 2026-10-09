@@ -1,5 +1,325 @@
 # Changelog 
 
+## Unreleased
+
+### Added
+- `torchfem.fabric` models sheared woven plies after forming (Aridhi et al. 2019) as two UD yarn layers in a `Laminate`, with the forming membrane `WovenFormingMembrane` and its shear-angle dependent modulus `G_12(gamma)`.
+
+### Fixed
+- A `Laminate` whose layers already carry element-wise properties builds its stations instead of being taken as vectorized.
+
+## Version 0.13.0 - September 30 2026
+
+### Added
+- `Axisymmetric` and `AxisymmetricHeat` solve a solid of revolution from a cross section meshed in the half plane `r >= 0`, with the hoop strain `u_r / r` and the revolved measure `2 pi r`. They take the same elements as the planar models and a three-dimensional material, whose tensors are ordered `(r, z, hoop)`.
+- `Mechanics.compute_h(...)`, `Mechanics.compute_bcb(...)` and `FEM.facet_measure(...)` are overridable, so a model can define its own gradient operator, tangent contraction and facet measure.
+- `Element.H(xi)` evaluates the reference-space second derivatives of the shape functions, with shape `(..., iso_dim, iso_dim, nodes)`. `B` and `H` are derived from `N` by autodiff, so a new element only defines `N`.
+- `solve(..., hessian_modulus=...)` adds the regularization energy ½ k ∇∇u ⋮ ∇∇u, per element or for all, that stabilizes a third medium in contact. `FEM.integrate_hessian(...)` returns its element matrix.
+- `IsotropicDamage3D` accepts `eq_strain="mises"`, a deviatoric equivalent strain that also drives damage in shear and compression, where `"rankine"` leaves `kappa` untouched whenever the largest principal strain is compressive. The plane and one-dimensional variants do not carry the full strain tensor and still reject it.
+
+### Changed
+- **Breaking:** `solve(...)` no longer takes `nlgeom`. A finite strain material already carries the geometric nonlinearity in its stress measure and tangent, so the argument only chose which stress was reported.
+- A model that does not implement geometric nonlinearity rejects a finite strain material when it is constructed, where `solve(nlgeom=True)` rejected it. A `Shell` checks its laminate layers too, which reached no check at all.
+- `Assembly.solve(...)` reports the Cauchy stress of a finite strain part, where it reported the first Piola stress.
+- **Breaking:** `FEM.supports_nlgeom` is `FEM.supports_finite_strain`, and the solve report names the analysis `finite strain`, since `nlgeom` names nothing in the API any more.
+- `Tria2` integrates at three interior points instead of the edge midpoints.
+
+### Fixed
+- `MechanicsMaterial.step(...)` receives the first Piola stress its signature names, where `nlgeom=True` fed back the Cauchy stress. No finite strain material reads it, so no result changes.
+- `Quad1.iweights` and `Quad2.iweights` are floating-point tensors like those of every other element.
+- A substep retried after a cutback scales its initial guess with the substep, where it restarted from the full previous increment and could fail every retry.
+
+## Version 0.12.1 - September 21 2026
+
+### Added
+- `Material.finite_strain` declares whether `step(...)` stays objective under rotation, as `symmetric_tangent` declares its tangent symmetry. Only the hyperelastic materials set it.
+
+### Changed
+- `solve(nlgeom=True)` raises for a small strain material. The combination was never valid, since an incremental small strain update is not objective under rotation.
+- A thermal model reports the heat flux as `-kappa grad(T)`, where it reported `+kappa grad(T)` under that name and the examples negated it again.
+
+### Fixed
+- `solve(nlgeom=True)` reports the Cauchy stress as `J^-1 P F^T`. It was the transpose of that, which a symmetric deformation gradient cannot tell apart, so a deformation carrying a rotation reported an unsymmetric stress.
+- The damage materials integrate their stress incrementally, so `ext_strain` no longer scales it with the number of increments.
+- A `Shell` reports its in-plane strain, where it returned the identity at every station, so a damage layer read only the current increment as its total strain.
+
+## Version 0.12.0 - September 18 2026
+
+### Added
+- `IsotropicDamage1D`, `IsotropicDamagePlaneStrain` and `IsotropicDamagePlaneStress`, so a `Truss` and a `Planar` model can carry damage. Under plane stress the out-of-plane strain follows the in-plane one and contributes to the tangent.
+- `TransverseIsotropicElasticityPlaneStress` and `TransverseIsotropicElasticityPlaneStrain`, so a unidirectional ply no longer needs its transverse shear moduli typed out by hand.
+- `TrussHeat` and `ShellHeat`, axial and in-plane heat conduction models sharing the elements, integration and plotting of `Truss` and `Shell` through the new `TrussGeometry` and `ShellGeometry` bases. A bar conducts along its axis alone.
+
+### Changed
+- **Breaking:** `Material` no longer defines `step(...)`. Materials derive from `MechanicsMaterial` or `HeatMaterial`, each carrying the `step(...)` of its own physics, and declare their spatial dimension through `Material.dim`. `HeatMaterial.step(...)` takes `(grad_inc, grad, flux, state, cl, iter)`, dropping the external strain increment a temperature has no use for. A model and a laminate layer take only a matching material, and `import_mesh(...)` and the typed imports return the model matching the material's physics.
+- **Breaking:** The reference surface `offset` moved from `Laminate` to `Shell` and `import_shell(...)`, where it applies to a homogeneous section too, takes one value per element, and is a fraction only (the `"mid"`/`"top"`/`"bottom"` strings are gone). `Laminate` is now a plain stack about its mid-plane.
+- `import_shell(...)` reads a flat surface mesh as a `Shell`, which `import_mesh(...)` reads as `Planar`.
+- `Shell.plot(thickness=True)` extrudes the shell into solid wedges or hexahedra between the true section surfaces, so an offset section no longer renders centered.
+- `node_property` and `element_property` accept a bare tensor or tensors keyed by their color bar title in every `plot(...)`, where each model took only one of the two. Where several are keyed, the first colors the plot, which `Truss.plot3d(...)` took from the last.
+- `Assembly.plot3d(...)` takes `axes` and a `camera` position and themes the plotter itself, as a part's `plot(...)` does.
+- `show_html(...)` in `torchfem.plot_utils` is now `show_plotter(pl, plotter=None, axes=False, camera=None)`, which also adds the grid and the camera and skips the display when the caller owns the plotter.
+- `THEMES` moved from `torchfem.elements` to `torchfem.plot_utils`, where the rest of the plotting helpers live.
+- `Assembly.solve(verbose=True)` warns about single precision, as `FEM.solve(...)` already did. One `solve_report(...)` in `torchfem.report` builds both reports now.
+
+### Removed
+- **Breaking:** `import_planar(...)` and `import_solid(...)`. `import_mesh(...)` returns the model matching the material; `import_shell(...)` stays, since a shell is the one type it cannot infer.
+- `Element.plot(...)`, which drew the documentation's shape function figures and nothing else, defaulting to a `docs/` path an installed package does not carry. `docs/images/shape_functions/plot_elements.py` draws them now.
+
+### Fixed
+- A Newton or linear solve that misses its tolerance raises the new `ConvergenceError` in `torchfem.sparse`, and the increment cutback in `FEM.solve(...)` catches only that.
+- `integrate_line_load(...)` takes a scalar on a thermal model in 3D, which was refused as an ambiguous direction, so a `ShellHeat` could not be loaded along an edge.
+- `import_mesh(...)` and `import_shell(...)` read a surface mesh with a `HeatMaterial` as a `ShellHeat`, where the former raised "A surface mesh has no heat model".
+- `ext_strain` takes a tensor of the model's flux shape, rather than one nodal degree of freedom per spatial dimension, which a `Shell` and a `Truss` do not have.
+- `IsotropicPlasticity1D` computes its elastoplastic tangent per element. The hardening derivative broadcast against the wrong axis, so a `sigma_f_prime` returning one value per element raised a shape error once more than one element yielded.
+- `TransverseIsotropicElasticity3D` accepts batched constants. Its admissibility check compared tensors with `>` and raised `Boolean value of Tensor with more than one value is ambiguous`.
+
+## Version 0.11.0 - September 7 2026
+
+### Changed
+- `cg` and `bicgstab` run in PyTorch on either device, over a Jacobi diagonal or nothing, rather than dispatching to CuPy or SciPy. They are 1.2 to 2.3 times faster than CuPy's on a GPU and 3 to 4 times faster than SciPy's on a CPU, at the same tolerance and iteration count, and `resolve_library` reports them as `torch`. An AMG preconditioner still goes to AmgX on CUDA and pyamg on CPU, where SciPy's Krylov solvers stay: they drive pyamg's hierarchy as fast as a PyTorch loop can, and the hierarchy is what dominates.
+- A direct solve of a CUDA matrix runs on the CPU, transfers included, because cuSOLVER's sparse LU is about 1.75 times slower than SuperLU over the sizes a direct solve is chosen for.
+- `modal_eigsolve(...)` solves on the CPU wherever its matrices live. The CUDA path called `eigsh` with arguments CuPy does not accept, so it had never worked.
+- **Breaking:** `minres` is gone. Its `rtol` is a normwise backward error, `||r||/(||A|| ||x||)`, rather than the relative residual `cg` tests, so the same tolerance bought a much weaker solution: over the systems the example notebooks solve, it missed the requested tolerance on 55% of them, by a median factor of 45 and up to 8e8, while taking fewer iterations than `cg` for it. Symmetric systems now go to `cg` and unsymmetric ones to `bicgstab`. The iterations it skipped were mostly the adjoint's, so a CPU backward pass now takes up to two and a half times as long, growing with the system, for a gradient that meets the tolerance it was given.
+- **Breaking:** `method` names the algorithm (`direct`, `cg`, `bicgstab`) and the new `preconditioner` names what preconditions it (`amg`, `jacobi`, `none`), with the library inferred from both and the device. The values `spsolve`, `pardiso` and `amgx` are gone: the first two were the libraries behind a direct solve, which is now chosen by availability, and the third was a Krylov method and an AMG preconditioner under a library's name. `preconditioner='amg'` on CUDA is how AmgX is now requested.
+- A material declares whether its tangent has major symmetry through `Material.symmetric_tangent`, which decides `cg` against `bicgstab`. `IsotropicDamage3D` sets it to `False`: its algorithmic tangent carries a rank-one term whose factors differ, and `cg` stagnates on the result rather than converging slowly.
+- A model builds its sparse index maps from the node adjacency and expands them by degree of freedom, rather than sorting the degree-of-freedom pairs themselves, which leaves `n_dof_per_node**2` fewer keys to sort. This speeds up setup significantly.
+- **Breaking:** `FEM.assemble_matrix(...)` returns a CSR tensor with int32 indices rather than a COO tensor with int64 ones, which is the layout the linear solvers convert to anyway. A model's index data shrinks to a quarter.
+- A planar model's AmgX solve aggregates geometrically, as a solid one already did, for roughly 40% fewer iterations. AmgX reads the problem dimension from whether a third coordinate is attached, so a planar model attaches two rather than a flat z.
+- `Assembly` eliminates its constrained degrees of freedom with a precomputed scatter map rather than a sparse-sparse product, which is about ten times faster per Newton iteration and needs no MKL.
+- **Breaking:** `sparse_solve(...)` takes and returns the reusable AmgX solver in its own `solver` slot rather than in `M`, which now holds a preconditioner alone. A preconditioner is freed by the garbage collector and an AmgX solver only by `close()`, so one slot could not follow one rule and every adjoint had to check the type of what it got back before deciding whether to free it.
+- **Breaking:** `sparse_solve(...)` and `modal_eigsolve(...)` take matrices compressed by row, or the `t()` of one as its transpose, rather than COO ones. They converted to that layout internally anyway, and every caller in the library now assembles it directly.
+
+### Removed
+- **Breaking:** `CachedSolve`, the `use_cached_solve` argument of `solve(...)` and `time_integration(...)`, and the `x0` initial guess of `sparse_solve(...)`. Warm-starting an iterative solve from the previous solution saved at most 10% of the Krylov iterations and no measurable wall time: a guess 0.7% off in solution norm still leaves a 48% residual, and the preconditioner is rebuilt on every call anyway.
+- **Breaking:** CuPy is no longer a dependency, and `"cupy"` no longer appears in `available_backends`. GPU support needs nothing but PyTorch.
+
+### Fixed
+- `cg` and `bicgstab` return zero for a zero right-hand side rather than iterating on it. The convergence threshold is relative to `||b||`, so it was zero as well, and the first step divided zero by zero: the solution filled with `NaN`, the residual test could never pass, and the solve ran its full iteration limit before raising a spurious `RuntimeError`. An adjoint reaches this whenever the loss does not depend on a particular solve, which hands the backward pass a zero seed.
+- The near-null space saved for the adjoint solve is detached, as the node coordinates beside it already were. It configures the multigrid aggregation and never enters the solution, but in shape optimization it is built from nodes that carry a gradient, so the saved copy held the node graph alive past the forward pass.
+
+## Version 0.10.0 - August 26 2026
+
+### Added
+- `Assembly` couples several models through kinematic constraints, mechanical or thermal, in two or three dimensions: `coupling(...)` makes selected nodes follow the rigid-body motion of the nearest node of another part, optionally on selected degrees of freedom.
+- `ReferencePoint` and `ReferencePointHeat` enter an assembly as free nodes carrying rigid-body degrees of freedom or one temperature, so a load or a prescribed value applied there drives everything coupled to it.
+- `Assembly.plot(...)` draws every part into one figure, with the points as markers and each coupling between the nodes it pairs, dispatching to matplotlib in 2D and PyVista in 3D. An argument given as a list is spread over the parts, so the `u` of `solve(...)` passes straight through.
+- `mesh_to_lattice(...)` turns a planar or solid mesh into a lattice of bar elements along its edges, optionally bracing each quadrilateral with one diagonal (`"up"`, `"down"`) or both (`"cross"`).
+- `Element.edges` lists the local node indices of the element edges, carrying the mid-side node on quadratic elements, and `linear_etype(...)` infers the linear element type of a mesh.
+- `Shell` accepts a quadrilateral mesh, which uses the MITC4 transverse shear interpolation of Dvorkin and Bathe, so it does not lock in the thin limit but neglects warp. The element type follows from the connectivity, as it does for `Planar`, and `import_mesh(...)` reads a non-planar quadrilateral mesh as a `Shell`.
+
+### Changed
+- **Breaking:** `FEM.compute_B(...)` is now `FEM.near_null_space(...)`, since it returns the near-null space a linear solver is preconditioned with and never the gradient operator that `B` denotes everywhere else. It shares one implementation with `Assembly` now, which carried its own copy.
+- **Breaking:** `drill_penalty` of `Shell` ties the drilling degree of freedom to the in-plane rotation of the membrane field rather than penalizing it towards zero, and is a fraction of the section's shear stiffness rather than an absolute stiffness, defaulting to `1e-3`. A penalty towards zero resists the rigid rotation of a curved element and locked a doubly-curved shell: the pinched hemisphere now stays within 1% on a 16x16 mesh where it reached 13% of the reference.
+- `Material.vectorize(...)` returns the type it was called on rather than a `Material`, so the properties of a concrete material stay visible to a type checker after vectorizing.
+- `PlanarHeat` and `SolidHeat` no longer inherit from `Planar` and `Solid`, but share their elements, integration and plotting through a `PlanarGeometry` and a `SolidGeometry` base that carries no physics. A thermal model therefore no longer exposes `forces`, `displacements`, `ext_strain` and `solve_modes`, which belonged to mechanics and aliased the thermal `heat_flux` and `temperatures`. An external gradient stays zero for a thermal model.
+- `k0(...)` is implemented once on `FEM` instead of separately for mechanics and heat, which built the same tensors under different names, and returns the same values as before.
+- `Laminate.plot(...)` takes an `ax` to draw into, as the other matplotlib plotters do, and leaves showing the figure to the caller.
+- `Laminate(...)` takes its layers as sequences rather than lists, so a tuple, or a list of one concrete material class held in a variable, is accepted where the invariance of `list` rejected it before.
+- `Truss.plot3d(...)` draws all bars in one pass instead of one mesh each, so a lattice of a few thousand bars renders in under a second instead of minutes. The spheres at the joints follow the largest bar meeting there instead of the mean of all bars.
+- `Planar.plot(...)` fills its elements, so a mesh reads as a solid rather than a lattice. `color` sets that fill and defaults to light blue as in the PyVista plotters, edges and labels follow the foreground of the matplotlib style, and `**kwargs` now reach the element `PolyCollection` instead of being ignored, so `edgecolor` or `hatch` work and a misspelled argument raises.
+- Boundary conditions in the matplotlib plotters are outlined, dotted where they attach to a node, and sized in points rather than in a fraction of the model. They sit above the node markers, with the arrows above the constraint markers they may cross.
+- `Material.rotate(...)` returns a rotated material instead of rotating the material in place, so a material may be rotated repeatedly, or shared between several rotated copies, without the rotations accumulating. Code that called it for its effect, as in `material.rotate(R)`, has to take the result now: `material = material.rotate(R)`.
+- `Material.vectorize(...)` is implemented once on the base class, batching the properties a material holds instead of rebuilding it through its constructor, rather than being written out by every material itself. It no longer prints when it is called on a material that is already vectorized, and it keeps the type of a `TransverseIsotropicElasticity3D` instead of returning an `OrthotropicElasticity3D`.
+
+### Removed
+- **Breaking:** `plot_contours(...)`, which drew the contours of a scalar function over a two-dimensional design space together with the paths an optimizer took through it. It was a teaching aid, marked as such in its docstring, and nothing in the library used it.
+
+### Fixed
+- The two `Negative Jacobian` checks of `Truss` and `Shell`, the unsupported element type of `linear_etype(...)`, and the two mesh checks of `import_mesh(...)` raise a `ValueError` rather than a bare `Exception`, as the same conditions do elsewhere, so one `except ValueError` catches them all.
+- `solve(...)` and `Assembly.solve(...)` squeezed every axis of the returned flux and gradient holding a single value, rather than those of the flux alone, so a model of one element lost its element axis and an element with one integration point lost that one.
+- `voigt2stiffness(...)` left `C_1122` and `C_2211` at zero in 3D, so converting a stiffness matrix from Voigt notation silently dropped the coupling between the two transverse normal components. It also added a spurious leading dimension to an unbatched input and raised on more than one batch dimension, where the other converters accept any.
+- `stiffness2voigt(...)` returned the transpose of the Voigt matrix it builds, which cancelled for the symmetric stiffness tensors it is given but made it no inverse of `voigt2stiffness(...)`.
+- `Material.vectorize(...)` dropped a rotation applied before it, because it rebuilt the material from engineering constants that cannot describe a rotated one. `material.rotate(R).vectorize(n)` now gives the same material as `material.vectorize(n).rotate(R)`.
+- `planar_rotation(...)`, `axis_rotation(...)` and `euler_rotation(...)` returned the transpose of the matrix they build, so they rotated by `-phi`. They now turn counter-clockwise, i.e. `axis_rotation(...)` follows the right-hand rule and a ply at `+45°` carries its stiff axis at `+45°`. Results that depend on the sign of an angle change: an unbalanced `Laminate` stacking sequence and any material rotated by an angle other than a multiple of 90° are mirrored compared to earlier versions. The orientation markers of `Planar.plot(...)` follow the same convention now.
+- Boundary condition glyphs are no longer clipped at the edge of the axes, which their size in points reaches past when the limits are fitted to the mesh.
+- `PlanarHeat.plot(...)` draws its thermal boundary conditions: a heat flux as a plus or a minus, and a prescribed temperature as a marker, which was drawn as nothing at all when it was non-zero.
+- `solve(..., nlgeom=True)` raises `NotImplementedError` up front on a model that does not carry geometric nonlinearity, which `Truss` and the heat models accepted silently. `Truss` solved on the reference configuration, where the direction cosines of the undeformed bar keep a rotation out of the axial strain, and a heat model ignored the argument outright. `Shell` rejected it already, but only from inside the Newton loop, whose cutbacks caught it as the `RuntimeError` it derives from and reported a spurious non-convergence after ten retries.
+- `time_integration(...)` started from a zero internal flux vector rather than the one belonging to the initial temperature field, which made its first step inconsistent and dropped the trapezoidal rule to first order in time whenever the initial condition was not already an equilibrium. The internal vector it returns at `t=0` is no longer zero.
+- `time_integration(...)` added the applied `heat_flux` to the trapezoidal residual instead of subtracting it at both ends of the step, so a transient solve driven by a heat source settled at minus one half of the steady state `solve(...)` gives. Results driven by prescribed temperatures alone are unchanged.
+- Fixed a mistake in the triangular shell element from incorrectly implementing an equation from the Krysl paper. `h` is now the element edge length rather than its area, and the element area enters the shear stiffness once instead of twice. Thin-shell results are essentially unchanged, because the two errors cancelled in that limit.
+
+## Version 0.9.0 - August 18 2026
+
+### Added
+- `integrate_body_load(...)`, `integrate_surface_load(...)` and `integrate_line_load(...)` turn a distributed load into consistent nodal loads, replacing the lumping that the examples wrote out by hand. Surfaces and lines are picked with a nodal mask, and a float load acts as a pressure along the outward normal.
+- `Element.facets` and `Element.facet_type` describe the codimension-1 facets of an element, i.e. the edges of a surface element and the faces of a volume element.
+- `FEM.integrate_shape_functions(...)` returns the integral of each shape function over its element, and `FEM.volume_scale` the volume per unit element measure.
+- `axes` on `Solid.plot(...)`, `Shell.plot(...)` and `Truss.plot3d(...)` shows labeled coordinate axes, matching the matplotlib plotters.
+- `camera` on `Solid.plot(...)`, `Shell.plot(...)` and `Truss.plot3d(...)` sets the camera to a coordinate plane, "iso", or an explicit position, focal point and view up.
+- `method="amgx"` solves on the GPU with AmgX algebraic multigrid, an optional backend that needs AmgX built from source and pointed at by `AMGX_DLL`. Iterative solves on CUDA use it automatically once it is installed, needing far fewer iterations than the Jacobi preconditioner. It does not converge on an indefinite tangent, where `method="cg"` or `method="minres"` still do.
+- `-method` on `benchmarks/run.py` overrides the linear solver a benchmark problem uses, and every result row now records the backend it actually ran on.
+- A fourth benchmark problem `topopt`, mirroring the *structural-mesh* problem of the mosaic benchmark suite: a SIMP cantilever on a random density field, whose 762-fold stiffness spread conditions the system far worse than the uniform fields of the other problems.
+
+### Changed
+- GPU support requires CUDA 12 or 13, dropping CUDA 11, whose last CuPy wheel predates the solver signatures used here.
+- `sparse_solve(...)` reuses a preconditioner passed as `M` on the GPU instead of rebuilding Jacobi every call, matching the CPU path, so a Newton loop and its adjoint solve share one Jacobi preconditioner.
+- `solve(...)` accepts increments that fall as well as rise, so a load cycle like `[0, 1, 0]` unloads instead of silently repeating the state at its peak.
+- `integrate_field(...)` is now a contraction of `integrate_shape_functions(...)` and returns the same values as before.
+- `solve(...)` no longer builds an element tangent it discards when evaluating the converged state at the end of each increment, which makes `nlgeom=True` and materials with internal state about 10% faster.
+- The PyVista plots always show the orientation axes in the corner, which a plain `pyvista.Plotter` skips.
+- `cmap` on `Planar.plot(...)`, `Truss.plot2d(...)` and `Truss.plot3d(...)` accepts a matplotlib `Colormap` next to a colormap name, so a truncated or resampled colormap can be passed directly.
+- `Element.plot(...)` writes a transparent light and dark figure to `docs/images/shape_functions/`, `<Element>_light.png` and `<Element>_dark.png`, instead of a single opaque one.
+- In notebooks, the PyVista plots redraw shortly after loading via `plot_utils.show_html(...)`, so vtk.js does not keep the first frame it draws from its own defaults.
+- The `thermal` and `hyperelasticity` benchmarks keep their elements cubic as `N` grows, where a fixed depth used to stretch them into slivers, so both measure problem size rather than element aspect ratio. All published results were re-measured on the new meshes.
+- The `hyperelasticity` benchmark picks its solver automatically instead of pinning `cg`, which selects AmgX on CUDA, and starts at `N=35`: the `N=25` case fell below the size at which `resolve_method` turns iterative, so it ran a direct solve slower than every larger case.
+- `verbose=True` no longer raises on a console whose codepage lacks the characters the report is drawn with, as a Windows console does by default.
+
+### Fixed
+- `method="amgx"` frees each AMG hierarchy when the solve that built it ends, where every increment, cutback and time step used to leave one on the GPU for the life of the process.
+
+## Version 0.8.0 - August 3 2026
+
+### Added
+- A PEP 561 `py.typed` marker, so downstream type checkers use the shipped annotations.
+- Tests for the conductivity materials, the orthotropic plane-stress and plane-strain materials, `linear_to_quadratic(...)`, `Truss`, `SolidHeat`, the boundary condition setters, and the non-planar mesh imports, none of which had unit tests before.
+- A first-order patch test over all eight supported element types. `Planar` and `Solid` were previously only ever tested with `Quad1` and `Hexa1` meshes.
+- `torchfem.sparse.resolve_method(...)` returns the linear solver backend that `sparse_solve(...)` picks for a given system size and device. `sparse_solve(...)` now uses it instead of its own copy of the rules.
+- `Solid.plot(..., clip=("rho", 0.5))` cuts the mesh at an iso-value of a property, culling orientations and boundary conditions with it. The `optimization/solid/bracket.ipynb` example uses it to show the optimized part instead of exporting a VTU for ParaView.
+- `Solid.plot(..., show_outline=True)` draws a box around the full mesh, which gives a clipped result its design space back.
+- `Shell.plot(..., plotter=pl)` and `Truss.plot3d(..., plotter=pl)` render into an existing PyVista plotter instead of creating and showing their own, as `Solid.plot(...)` already did.
+- `bcs` on `Truss.plot2d(...)` and `Truss.plot3d(...)`, which drew boundary conditions unconditionally. It defaults to True, matching `Planar.plot(...)`, so plots are unchanged unless it is switched off.
+- `Shell.plot(..., orientations=...)` draws per-element direction vectors, e.g. the local frames `shell.t`, as red, green, and blue arrows, like `Solid.plot(...)` does. On a shell drawn with `thickness=True` they sit on the top surface instead of inside it. The `optimization/shell/orientation.ipynb` example uses it to show the optimized fiber directions in 3D.
+- `Shell.plot(..., show_undeformed=True)` for consistency.
+- `Solid.plot(..., orientations=...)` accepts fewer than three vectors per element, like `Shell.plot(...)`, so `[n_elem, 1, 3]` draws a fiber direction alone. The `optimization/solid/topology+orientation.ipynb` example passes just that instead of the full rotated frame.
+- Docstrings for `Truss.plot2d(...)` and `Truss.plot3d(...)`, which had none.
+
+### Changed
+- The `notebook` extra requires `pyvista[jupyter]` instead of listing `trame`, `trame-vtk`, and `trame-vuetify` itself, so the trame versions stay inside the range PyVista supports. A newer `trame-vtk` ships a VTK.js bundle that PyVista's HTML Jupyter backend embeds incorrectly, leaving the plot blank.
+- `Solid.plot(...)` passes `algorithm=None` to `extract_surface(...)`, silencing a PyVista warning about its default changing. The extracted surface is unchanged.
+- `Shell.plot(..., mirror=...)` no longer draws the constraint cones that enforce the symmetry of a mirrored plane, since the mirrored copy already shows that symmetry, and warns if the nodes on such a plane are not symmetry-constrained. Loads and all other constraints on the plane are still drawn.
+- `Shell.plot(...)` and `Truss.plot3d(...)` no longer set the global PyVista Jupyter backend to `client`. Both pass `jupyter_backend="html"` to `show(...)`, which overrode it anyway, so only the global side effect on other plots is gone.
+- `verbose=True` in `solve(...)` and `time_integration(...)` prints a compact table with one row per increment, holding its substeps, iterations, residual, wall time, and flags counting the substep cutbacks (`↓`) and growths (`↑`), under a header naming the model, the machine, the linear solver backend actually used, and the Newton settings. Notebooks redraw the table in place, elsewhere rows stream as they complete. Iterations count linear solves, so a linear problem needs exactly one.
+- **Breaking:** The `verbose` argument of `torchfem.sparse.newton_solve(...)` became `report`, taking a `torchfem.report.SolveReport` or `None` instead of a bool.
+- Linting and formatting moved from `black`, `isort`, and `flake8` to `ruff`, configured in `pyproject.toml` under `[tool.ruff]`. Local checks are now `ruff format .` and `ruff check --fix .`. Ruff also lints the example notebooks, which the previous stack never covered.
+- CI measures test coverage with `pytest-cov` and fails below 78% (currently 81%).
+- The `increments` argument of `solve(...)` and the `t_output` argument of `time_integration(...)` now default to `None` instead of a `torch.tensor([0.0, 1.0])` built once at import. The effective default is unchanged.
+- The `optimization/solid/bracket.ipynb` example interpolates stiffness as `C_min + rho^p (C0 - C_min)` with `C_min = 1e-3 C0`, instead of `rho^p C0`. The stiffness floor no longer depends on the density bound, so `rho_min` drops from 0.01 to 1e-3 and less of the volume budget is spent on void.
+- **Breaking:** `G_13` and `G_23` of `OrthotropicElasticityPlaneStress` and `OrthotropicElasticityPlaneStrain` are unset instead of defaulting to `0.0`, and a homogeneous `Shell(...)` integrates them into its transverse shear stiffness when `transverse_G` is not given. A `Laminate` of plies without transverse moduli silently integrated to zero transverse shear stiffness before and now raises.
+
+### Removed
+- **Breaking:** The `contour` argument of `Solid.plot(...)`, superseded by `clip`. The `basic/solid/gyroid.ipynb` example now clips on `thickness - sdf.abs()`, rendering the wall as a solid instead of its two bounding surfaces.
+- **Breaking:** The `threshold_condition` argument of `Solid.plot(...)`, superseded by `clip`.
+- **Breaking:** The `torchfem.sdfs` module, which provided signed distance functions for implicit geometry (TPMS surfaces, primitives, and CSG booleans) and is out of scope for a finite element library. The `basic/solid/gyroid.ipynb` example now defines its distance function inline.
+- The `basic/solid/implicits.ipynb` and `basic/solid/tpms.ipynb` examples and their gallery entries.
+
+### Fixed
+- `solve(...)` subdivided every increment of a load path with growing increments. The attempted substep is now carried across increments as a fraction of an increment instead of an absolute size.
+- `solve(...)` never recovered to one substep per increment after a cutback. It grew the substep from `step`, which is clipped so the substep lands exactly on the requested increment, instead of from the size it asked for. Every increment therefore ended by shrinking the substep to `growth_factor` times its own last remainder, and kept subdividing ever more finely for the rest of the load path. The `basic/planar/stabilization.ipynb` snap-through now takes 126 Newton iterations instead of 168.
+- `__repr__` of `Truss`, `Planar`, `Solid`, and `Shell` reported the element type as `ABCMeta`. It read `self.etype.__class__.__name__`, but `etype` is already a class, so this gave the name of its metaclass.
+- `rotate(...)` raised `IndexError` on `OrthotropicElasticityPlaneStrain` and returned meaningless `E_1`, `E_2`, `nu_12`, and `G_12` on `OrthotropicElasticityPlaneStress`. Both inverted the fourth-order stiffness tensor instead of its Voigt matrix, and now use `stiffness2voigt(self.C)` like the 3D class. The rotated `C` was always correct.
+- The `IsotropicConductivity3D` docstring documented a non-existent attribute `k` (it is `kappa`) and described `step(...)` as a small-strain elasticity model.
+- Several functions shared a single mutable default across all calls: `cached_solve=CachedSolve()` in `sparse_solve(...)`, `newton_solve(...)` and their autograd wrappers, `nodal_data`/`elem_data` in `export_mesh(...)`, and two arguments of `plot_contours(...)`. Each default is now built per call.
+- The `psi` function in the `basic/solid/large_compression.ipynb` example read the module-level `mu` and `lbd` instead of its `params`, which would have zeroed gradients with respect to `params`. Results are unchanged.
+
+## Version 0.7.5 - July 30 2026
+
+### Added
+- Automatic increment cutback in `solve(...)` via the new `cutback_factor`, `growth_factor`, and `max_cutbacks` arguments. A non-converged Newton solve retries from the last converged state with a smaller substep, and results still come back at exactly the requested `increments`.
+- Optional viscous stabilization in `solve(...)` via `alpha`, matching Abaqus automatic stabilization with "Specify damping factor" and disabled by default. `model.stabilization_energy` reports the dissipated energy per increment, equivalent to the Abaqus `ALLSD` output.
+- New example `basic/planar/stabilization.ipynb` tracing the snap-through of a shallow cylindrical roof, plus a theory docs section and tests for stabilization.
+- `Solid.plot(..., bcs=True)` and `Shell.plot(..., bcs=True)` render boundary conditions: arrows for forces and prescribed displacements, spheres at displacement tips, and a cone per constrained DOF. Shells double the heads for the rotational DOFs, drawing moments as double-headed arrows and constrained rotations as double cones.
+
+### Changed
+- The default `max_iter` of `solve(...)` is 10 instead of 100. Exceeding it now triggers an increment cutback rather than aborting the solve.
+- `Planar.plot(...)` and `Truss.plot(...)` draw boundary conditions to scale. Force arrows scale with their magnitude instead of all being equally long, prescribed non-zero displacements become an arrow ending in a dot at the position the node is pulled to, and each fixed DOF gets its own marker.
+- **Breaking:** Removed the `force_size_factor` and `constraint_size_factor` arguments of `Truss.plot3d(...)`. Markers are sized automatically, cones from the mean bar length.
+- 3D trusses draw a sphere at each node smoothing the tube joints, and batch their boundary condition markers into one glyph each, which renders a 343-node truss about 1.7 times faster.
+- Type annotations use the builtin generics `tuple`, `list`, and `dict` instead of their deprecated `typing` aliases, and import `Callable` from `collections.abc`. Signatures are unchanged apart from their spelling.
+
+### Fixed
+- `Truss.plot(...)` no longer raises when a 3D truss has no applied forces.
+
+## Version 0.7.4 - July 15 2026
+
+### Added
+- Regression tests for `time_integration(...)` in `tests/test_time_integration.py`.
+- Notebook tests for `basic/solid/thermal_transient.ipynb` and `optimization/planar/orientation_thermal_transient.ipynb`.
+
+### Changed
+- **Breaking:** `time_integration(...)` returns one result per requested `t_output` time. Previously `t_output` only set the end time and results came back per internal time step.
+- **Breaking:** Removed the `return_intermediate` argument of `time_integration(...)`. Results always carry a leading time axis of length `len(t_output)`; request the internal grid explicitly with `times = torch.arange(0.0, end_time + delta_t, delta_t)`, or index `[-1]` for the final state.
+- `time_integration(...)` subdivides each interval between output times into equal substeps of at most `delta_t`, replacing the `torch.arange(...)` and `unique()` merge. Output times are hit exactly, and a requested time close to an internal step no longer adds a spurious near-zero step.
+- `time_integration(...)` raises `ValueError` for empty, negative, or non-increasing `t_output`.
+
+### Fixed
+- `time_integration(...)` no longer drops the leading time axis of heat flux and temperature gradient when a single output time is requested.
+
+## Version 0.7.3 - July 14 2026
+
+### Added
+- Typed mesh import wrappers `import_shell(...)`, `import_planar(...)`, and `import_solid(...)` in `io.py` that return the requested model type and raise `TypeError` when the file's element type does not match.
+- New shell size-optimization example `optimization/shell/pressure_vessel.ipynb` (replacing the old `freesize.ipynb`), linked in the docs example gallery and covered by the notebook tests.
+- A minimal topology-optimization walkthrough in the getting-started docs, alongside a rewritten planar `topology.ipynb` example.
+- Python 3.14 added to the CI test matrix and the PyPI classifiers, plus additional package keywords in `pyproject.toml`.
+- Regression test guarding the `differentiable_parameters` trap: `solve()` outputs are fully detached when a grad-requiring design variable is not declared.
+
+### Changed
+- `torchfem.sdfs` no longer calls `torch.set_default_dtype(torch.float64)` at import time. SDF constructors now default their tensor arguments to `None` and build them internally, so importing the module no longer mutates the global default dtype.
+- `import_mesh(...)` converts mesh points to native-byte-order `float64` before building node tensors (previously cast to `float32`), correctly importing legacy big-endian `.vtk` files and preserving coordinate precision.
+- `Shell.plot(...)` forwards `**kwargs` to the underlying PyVista `add_mesh` calls (defaulting to `show_edges=True`), so surface appearance is customizable.
+
+### Fixed
+- Forgetting to declare a differentiable argument in a `solve(...)` call now fails loudly: when parameter gradients are not tracked, all outputs are detached instead of silently returning wrong gradients.
+- Corrected the performance docs, which still referenced the removed `cubes.ipynb`, and a stale version reference in the publications docs.
+
+## Version 0.7.2 - July 13 2026
+
+### Added
+- Two new benchmark problems next to the cube extension: a thermal SIMP slab (mirroring the *thermal-mesh* problem of the mosaic benchmark suite) and a Neo-Hookean large-stretch cube. Both are documented with CPU/GPU results and plots on the performance docs page.
+- New example `optimization/solid/source_recovery_thermal.ipynb` recovering a heat source distribution via adjoint optimization, linked in the docs example gallery.
+- New cube benchmark results for Apple M1 Pro and RTX 5090.
+- Gradient regression tests for multi-increment solves: load-side gradients against a single-step solve, and nonlinear Neo-Hookean material parameter gradients against the analytical uniaxial solution.
+
+### Changed
+- Refactored `benchmarks/` into per-problem modules (`cubes.py`, `thermal.py`, `hyperelasticity.py`) sharing a problem interface in `utils.py`. `run.py` runs one or all problems and writes `results/<problem>_<label>.json`. The outdated `cubes.ipynb` is removed.
+- `newton_solve(...)` and its `eval_residual` callback now receive the previous increment's state (`u_prev`, `grad_prev`, `flux_prev`, `state_prev`) explicitly.
+
+### Fixed
+- Adjoint gradients of multi-increment solves were truncated to the last increment, because the residual closure late-bound the loop variables and the previous state was detached. Gradients now chain across increments and match single-step and analytical references.
+- Adapted to CuPy's rename of the CG tolerance argument from `tol` to `rtol`.
+
+## Version 0.7.1 - July 8 2026
+
+### Added
+- New optional dependency group `notebook` for running the example notebooks.
+- New optional dependency group `dev` with the development tools.
+- Binder configuration (`.binder/requirements.txt`) so the Binder badge installs the package with the `notebook` extra.
+- CI now enforces linting (`flake8`), formatting (`black`, `isort`), and type checking (`basedpyright`) as dedicated jobs, and the tool configuration lives in `.flake8` and `pyproject.toml`.
+- A `notebook` pytest marker so the slow example-notebook tests can be split from the fast unit tests (`pytest -m "not notebook"`).
+- A "Models" section in the docs with API documentation for the core model classes (`Truss`, `Planar`, `Shell`, `Solid`, and heat variants) and new docstrings on these classes.
+- An examples gallery page in the docs linking all rendered example notebooks.
+
+### Changed
+- Split the monolithic `materials.py` into a `torchfem.materials` subpackage (`base`, `elasticity`, `hyperelasticity`, `plasticity`, `damage`, `conductivity`) mirroring the documentation structure. All material classes remain importable from `torchfem.materials`, so existing imports are unaffected.
+- Fixed VRAM tracking and updated GPU benchmarks.
+- Made torch to cupy handoff in `sparse.py` more memory friendly to reduce VRAM. 
+- Slimmed core dependencies: the packages above are only used by the example notebooks.
+- Relaxed the SciPy pin from `scipy~=1.15.0` to `scipy>=1.14` and added an explicit `torch>=2.0` lower bound.
+- Declared `numpy` as an explicit dependency.
+- CI runs the fast unit tests across Python 3.10–3.13 and the notebook tests once, instead of executing every notebook on all four versions.
+- Modernize PyPI publishing workflow.
+- Restructured the README.
+- Complete the theory page in the docs.
+
+### Fixed
+- Resolved all `basedpyright` type-checking errors.
+
+## Version 0.7.0 - July 1 2026 
+
+### Added
+- Composite laminates for shells via a new `Laminate` section: per-layer material, thickness, and angle, symmetric layups, reference-surface `offset`, per-layer Simpson integration, transverse shear and mass integrals, and nonlinear (state-bearing) plies integrated through the thickness. (Thanks to @yvanblanchard)
+- Examples `shell/cantilever_laminate.ipynb`, `shell/cantilever_fml.ipynb` (GLARE fiber-metal laminate), and `shell/copv.ipynb` (composite overwrapped pressure vessel).
+
+### Changed
+- `torchfem.data.get_data()` now returns a `pathlib.Path` instead of `str`.
+
+### Fixed
+- Plane-stress plasticity: the algorithmic tangent now broadcasts a per-point hardening slope `sigma_f_prime(q)` correctly across a batch.
+- Global material `orientation` for `Shell`, projected onto each element to define the ply-angle reference axis (independent of element node ordering).
+
+### Removed
+- Unused failure-criteria module.
+
 ## Version 0.6.3 - May 18 2026 
 
 ### Added

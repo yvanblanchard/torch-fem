@@ -1,0 +1,61 @@
+{
+  "hardware": "i7-13700K",
+  "device": "cpu",
+  "python": "3.12.12",
+  "libraries": "SciPy 1.15.3, PyTorch 2.10.0+cu126",
+  "dtype": "float64",
+  "commit": "115337d",
+  "problem": "structural_cantilever_simp",
+  "rows": [
+    {
+      "N": 20,
+      "dofs": 54243,
+      "setup_s": 0.1712,
+      "fwd_s": 2.2685,
+      "bwd_s": 1.0713,
+      "peak_ram_mb": 1231.3,
+      "peak_vram_mb": null,
+      "solver": "cg | iterative | amg | scipy | cpu"
+    },
+    {
+      "N": 30,
+      "dofs": 175863,
+      "setup_s": 0.5952,
+      "fwd_s": 7.5923,
+      "bwd_s": 3.4865,
+      "peak_ram_mb": 2500.4,
+      "peak_vram_mb": null,
+      "solver": "cg | iterative | amg | scipy | cpu"
+    },
+    {
+      "N": 40,
+      "dofs": 408483,
+      "setup_s": 1.4413,
+      "fwd_s": 18.1477,
+      "bwd_s": 8.5225,
+      "peak_ram_mb": 6202.2,
+      "peak_vram_mb": null,
+      "solver": "cg | iterative | amg | scipy | cpu"
+    },
+    {
+      "N": 50,
+      "dofs": 788103,
+      "setup_s": 2.8861,
+      "fwd_s": 33.5615,
+      "bwd_s": 16.4005,
+      "peak_ram_mb": 10514.1,
+      "peak_vram_mb": null,
+      "solver": "cg | iterative | amg | scipy | cpu"
+    },
+    {
+      "N": 60,
+      "dofs": 1350723,
+      "setup_s": 5.1563,
+      "fwd_s": 61.9715,
+      "bwd_s": 29.8244,
+      "peak_ram_mb": 17337.6,
+      "peak_vram_mb": null,
+      "solver": "cg | iterative | amg | scipy | cpu"
+    }
+  ]
+}

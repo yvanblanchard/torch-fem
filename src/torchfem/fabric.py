@@ -58,8 +58,9 @@ Optional extension (not in the paper, listed there as future work):
 ``t = t_0 / cos(gamma)`` (fibre volume and volume fraction conserved).
 
 Angles in this module are *geometric*: counter-clockwise from the first local
-axis of each shell element (``edge 0->1``) about the element normal. They are
-converted internally to the `Laminate` angle convention.
+axis of each shell element (the `Shell` orientation projected on the element)
+about the element normal. They are converted internally to the `Laminate`
+angle convention.
 """
 
 from __future__ import annotations
@@ -320,17 +321,13 @@ class AnisotropicElasticityPlaneStress(OrthotropicElasticityPlaneStress):
         )
         self.C = C.clone()
 
-    def vectorize(self, n_elem: int) -> AnisotropicElasticityPlaneStress:
-        if self.C.shape[0] != n_elem:
-            raise ValueError("Stiffness was built for a different element count.")
-        return self
-
     def rotate(self, R: Tensor) -> AnisotropicElasticityPlaneStress:
-        """Rotates the stiffness tensor (no engineering-constant update)."""
-        self.C = torch.einsum(
+        """Returns a copy with the stiffness tensor rotated by ``R``."""
+        new = copy.copy(self)
+        new.C = torch.einsum(
             "...ijkl,...mi,...nj,...ok,...pl->...mnop", self.C, R, R, R, R
         )
-        return self
+        return new
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +351,7 @@ class DrapedPly:
 
     Args:
         ply: Ply material.
-        theta_1: Warp angle per element (geometric, CCW from local axis 1).
+        theta_1: Warp angle per element (geometric, CCW from the shell local axis 1).
         theta_2: Weft angle per element.
     """
 
@@ -422,10 +419,14 @@ def build_draped_laminate(
             angles.append(torch.zeros(n))
             info.append(LayerInfo(k, "woven", p, dp.theta_1, dp.theta_2))
         elif representation == "subplies":
-            for kind, yarn, theta, frac in (
+            subplies: tuple[
+                tuple[Literal["warp", "weft"], YarnLayer, Tensor, float], ...
+            ]
+            subplies = (
                 ("warp", p.warp, dp.theta_1, v1),
                 ("weft", p.weft, dp.theta_2, 1.0 - v1),
-            ):
+            )
+            for kind, yarn, theta, frac in subplies:
                 materials.append(
                     OrthotropicElasticityPlaneStress(
                         yarn.E_L, yarn.E_T, yarn.nu_LT, yarn.G_LT, g_t, g_t, p.rho
@@ -460,7 +461,7 @@ def yarn_stresses(shell, sigma: Tensor, info: list[LayerInfo]) -> list[dict]:
         One dict per station: ``layer``, ``ply``, ``family`` (list) and
         ``s11, s22, t12`` of shape ``(n_families, n_elem)``.
     """
-    lam = shell.material
+    lam = shell.section
     out = []
     for j in range(lam.n_z):
         k = int(lam.layer[j])
@@ -470,11 +471,17 @@ def yarn_stresses(shell, sigma: Tensor, info: list[LayerInfo]) -> list[dict]:
         sv = torch.stack([s[..., 0, 0], s[..., 1, 1], s[..., 0, 1]], -1)
         e = torch.linalg.solve(Cv, sv)  # engineering shear strain
         eps = torch.stack(
-            [torch.stack([e[..., 0], 0.5 * e[..., 2]], -1),
-             torch.stack([0.5 * e[..., 2], e[..., 1]], -1)], -2
+            [
+                torch.stack([e[..., 0], 0.5 * e[..., 2]], -1),
+                torch.stack([0.5 * e[..., 2], e[..., 1]], -1),
+            ],
+            -2,
         )
         if li.kind == "woven":
-            fams = [("warp", li.ply.warp, li.theta_1), ("weft", li.ply.weft, li.theta_2)]
+            fams = [
+                ("warp", li.ply.warp, li.theta_1),
+                ("weft", li.ply.weft, li.theta_2),
+            ]
         else:
             yarn = li.ply.warp if li.kind == "warp" else li.ply.weft
             fams = [(li.kind, yarn, li.theta_1)]
@@ -547,14 +554,22 @@ def grid_to_shell_mesh(grid_nodes: Tensor) -> dict[str, Tensor]:
     }
 
 
-def element_frames(nodes: Tensor, elements: Tensor) -> Tensor:
-    """Local shell frames ``(n_elem, 3, 3)``, rows ``[e1, e2, n]`` (as `Shell`)."""
+def element_frames(
+    nodes: Tensor, elements: Tensor, orientation=(1.0, 0.0, 0.0)
+) -> Tensor:
+    """Local shell frames ``(n_elem, 3, 3)``, rows ``[e1, e2, n]``, built as in
+    `Shell`: ``e1`` is ``orientation`` projected on the element (edge 0->1 where
+    the projection vanishes) and ``n`` the Newell mean-plane normal."""
     x = nodes[elements]
     edge1 = x[:, 1] - x[:, 0]
-    edge2 = x[:, 2] - x[:, 0]
-    e1 = torch.nn.functional.normalize(edge1, dim=-1)
-    n = torch.nn.functional.normalize(torch.linalg.cross(edge1, edge2), dim=-1)
-    e2 = torch.nn.functional.normalize(torch.linalg.cross(n, edge1), dim=-1)
+    rel = x - x.mean(dim=1, keepdim=True)
+    area = torch.linalg.cross(rel, rel.roll(-1, dims=1), dim=-1).sum(dim=1)
+    n = torch.nn.functional.normalize(area, dim=-1)
+    o = torch.as_tensor(orientation, dtype=nodes.dtype).expand_as(n)
+    proj = o - (o * n).sum(dim=-1, keepdim=True) * n
+    degen = (proj.norm(dim=-1) < 1e-8).unsqueeze(-1)
+    e1 = torch.nn.functional.normalize(torch.where(degen, edge1, proj), dim=-1)
+    e2 = torch.nn.functional.normalize(torch.linalg.cross(n, e1), dim=-1)
     return torch.stack([e1, e2, n], dim=1)
 
 
@@ -568,9 +583,9 @@ def direction_angles(nodes: Tensor, elements: Tensor, d: Tensor) -> Tensor:
 def map_directions(src_points: Tensor, src_dirs: Tensor, dst_points: Tensor) -> Tensor:
     """Nearest-neighbour transfer of direction vectors between meshes (e.g.
     from a draping grid to a structural mesh)."""
-    from scipy.spatial import cKDTree
+    from scipy.spatial import KDTree
 
-    _, idx = cKDTree(src_points.numpy()).query(dst_points.numpy())
+    _, idx = KDTree(src_points.numpy()).query(dst_points.numpy())
     return src_dirs[torch.as_tensor(idx)]
 
 
@@ -635,8 +650,12 @@ def bias_extension_kinematics(
         # yarn along g2 (y + x = const): down-right reaches x=W after W - x
         grip2 = (y <= W - x) | (L - y <= x)
         zone = 2 - grip1.long() - grip2.long()
-        f1 = torch.where((zone == 2)[..., None] | ((zone == 1) & grip1)[..., None], fA1, g1)
-        f2 = torch.where((zone == 2)[..., None] | ((zone == 1) & grip2)[..., None], fA2, g2)
+        f1 = torch.where(
+            (zone == 2)[..., None] | ((zone == 1) & grip1)[..., None], fA1, g1
+        )
+        f2 = torch.where(
+            (zone == 2)[..., None] | ((zone == 1) & grip2)[..., None], fA2, g2
+        )
         # zone C: both initial directions
         f1 = torch.where((zone == 0)[..., None], g1, f1)
         f2 = torch.where((zone == 0)[..., None], g2, f2)
@@ -655,7 +674,14 @@ def bias_extension_kinematics(
     F = torch.stack([pf1, pf2], -1) @ G_inv  # (n_path, n, 2, 2)
     dX = (X - X0) / n_path
     x = X0 + torch.einsum("pnij,nj->ni", F, dX)
-    return {"zone": zone, "gamma": gamma, "f1": f1, "f2": f2, "x": x, "gamma_A": gA}
+    return {
+        "zone": zone,
+        "gamma": gamma,
+        "f1": f1,
+        "f2": f2,
+        "x": x,
+        "gamma_A": torch.tensor(gA),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -670,7 +696,7 @@ G12_GLASS_PP = (0.051, -0.83, 6.1275, -12.0972, 8.48)  # a_0 ... a_4
 def shear_modulus(gamma: Tensor, coeffs=G12_GLASS_PP) -> Tensor:
     """Tangent in-plane shear modulus ``G_12(|gamma|) = sum_k a_k |gamma|^k``."""
     g = torch.as_tensor(gamma).abs()
-    return sum(a * g**k for k, a in enumerate(coeffs))
+    return sum((a * g**k for k, a in enumerate(coeffs)), torch.zeros_like(g))
 
 
 def shear_stress(gamma: Tensor, coeffs=G12_GLASS_PP) -> Tensor:
@@ -686,7 +712,10 @@ def shear_stress(gamma: Tensor, coeffs=G12_GLASS_PP) -> Tensor:
 def shear_energy(gamma: Tensor, coeffs=G12_GLASS_PP) -> Tensor:
     """Shear energy density ``Phi(gamma) = int_0^|gamma| tau``."""
     g = torch.as_tensor(gamma).abs()
-    return sum(a * g ** (k + 2) / ((k + 1) * (k + 2)) for k, a in enumerate(coeffs))
+    return sum(
+        (a * g ** (k + 2) / ((k + 1) * (k + 2)) for k, a in enumerate(coeffs)),
+        torch.zeros_like(g),
+    )
 
 
 def _forming_psi(F: Tensor, p: Tensor) -> Tensor:
@@ -725,13 +754,15 @@ class WovenFormingMembrane(Hyperelastic3D):
     the hypoelastic law (log strain in the fibre-rotated frames) and the shear
     stress conjugate to ``gamma`` follows ``d tau = G_12(gamma) d gamma``. The
     stress and tangent are obtained by automatic differentiation (2D ``F``,
-    use with `Planar` and ``nlgeom=True``).
+    use with `Planar`).
 
     Args:
         E_1, E_2: Yarn tensile moduli (MPa).
         f01, f02: Initial warp / weft directions in the plane (unit vectors).
         G12_coeffs: Coefficients ``a_0..a_4`` of ``G_12(gamma)`` (MPa).
     """
+
+    dim = 2
 
     def __init__(
         self,
@@ -751,15 +782,6 @@ class WovenFormingMembrane(Hyperelastic3D):
             [torch.tensor([E_1, E_2]), f01, f02, torch.as_tensor(G12_coeffs)]
         ).to(torch.get_default_dtype())
         super().__init__(_forming_psi, params, rho)
-
-    def vectorize(self, n_elem: int):
-        if self.is_vectorized:
-            return self
-        new = copy.copy(self)
-        new.params = self.params.repeat(n_elem, 1)
-        new.rho = self.rho.repeat(n_elem)
-        new.is_vectorized = True
-        return new
 
     @staticmethod
     def yarn_state(F: Tensor, params: Tensor) -> dict[str, Tensor]:
@@ -803,12 +825,14 @@ def bias_specimen_mesh(W: float, L: float, n_w: int) -> tuple[Tensor, Tensor]:
     g1 = torch.tensor([r2, r2])
     g2 = torch.tensor([-r2, r2])
     n = int(round(n_l)) + n_w + 2
-    I, J = torch.meshgrid(torch.arange(-n, n + 1.0), torch.arange(-n, n + 1.0), indexing="ij")
-    P = I[..., None] * h * g1 + J[..., None] * h * g2
+    ii, jj = torch.meshgrid(
+        torch.arange(-n, n + 1.0), torch.arange(-n, n + 1.0), indexing="ij"
+    )
+    P = ii[..., None] * h * g1 + jj[..., None] * h * g2
     tol = 1e-9 * L
     inside = (P[..., 0] > -tol) & (P[..., 0] < W + tol)
     inside &= (P[..., 1] > -tol) & (P[..., 1] < L + tol)
-    ids = -torch.ones(I.shape, dtype=torch.long)
+    ids = -torch.ones(ii.shape, dtype=torch.long)
     ids[inside] = torch.arange(int(inside.sum()))
     q = torch.stack([ids[:-1, :-1], ids[1:, :-1], ids[1:, 1:], ids[:-1, 1:]], -1)
     q = q.reshape(-1, 4)
@@ -833,7 +857,7 @@ def bias_extension_forming(
 ) -> dict:
     """Bias-extension forming simulation with the `WovenFormingMembrane` law.
 
-    Large-strain membrane (torch-fem `Planar`, ``nlgeom=True``) of a specimen
+    Large-strain membrane (torch-fem `Planar`) of a specimen
     with yarns at +-45 deg, clamped on bands of depth ``h / sqrt2`` at both
     ends, the top band moved by ``d`` in at least ``n_inc`` increments of at
     most ``max_step`` (Newton needs ~1 mm steps from the undeformed state,
@@ -860,11 +884,13 @@ def bias_extension_forming(
     n_inc = max(n_inc, math.ceil(d / max_step))
     inc = torch.linspace(0.0, 1.0, n_inc + 1)
     u, f, _, F, _ = model.solve(
-        increments=inc, nlgeom=True, return_intermediate=True, max_iter=50,
+        increments=inc,
+        return_intermediate=True,
+        max_iter=50,
         verbose=verbose,
     )
     u, f, F = u.detach(), f.detach(), F.detach()
-    st = WovenFormingMembrane.yarn_state(F, model.material.params.detach())
+    st = WovenFormingMembrane.yarn_state(F, mat.params.repeat(len(elements), 1))
     return {
         "nodes": nodes,
         "elements": elements,

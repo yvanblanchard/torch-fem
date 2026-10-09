@@ -1,11 +1,8 @@
-import tempfile
-from pathlib import Path
-
 import pytest
 import torch
-from matplotlib import pyplot as plt
 
-from torchfem.elements import ELEMENT_REGISTRY, Bar1, Bar2, Quad1, Quad2, Tria1, Tria2
+from torchfem.elements import ELEMENT_REGISTRY, linear_to_quadratic
+from torchfem.mesh import cube_hexa, cube_tetra, rect_quad, rect_tri
 
 
 @pytest.mark.parametrize(
@@ -26,11 +23,23 @@ def test_jacobian(elem):
     ELEMENT_REGISTRY,
 )
 def test_gradient(elem):
-    for q in elem.ipoints:
-        q.requires_grad = True
-        for i in range(elem.nodes):
-            grad = torch.autograd.grad(elem.N(q)[i], q)[0]
-            assert torch.allclose(grad, elem.B(q)[:, i], atol=1e-5)
+    xi = torch.cat([elem.ipoints, elem.iso_coords])
+    dxi = 1e-6 * torch.eye(elem.iso_dim)[:, None]
+    fd = (elem.N(xi + dxi) - elem.N(xi - dxi)) / 2e-6
+    assert torch.allclose(elem.B(xi), fd.transpose(0, 1), atol=1e-6)
+    assert torch.allclose(elem.B(xi[0]), fd[:, 0])
+
+
+@pytest.mark.parametrize(
+    "elem",
+    ELEMENT_REGISTRY,
+)
+def test_hessian(elem):
+    xi = torch.cat([elem.ipoints, elem.iso_coords])
+    dxi = 1e-6 * torch.eye(elem.iso_dim)[:, None]
+    fd = (elem.B(xi + dxi) - elem.B(xi - dxi)) / 2e-6
+    assert torch.allclose(elem.H(xi), fd.transpose(0, 1), atol=1e-6)
+    assert torch.allclose(elem.H(xi[0]), fd[:, 0], atol=1e-6)
 
 
 @pytest.mark.parametrize(
@@ -54,11 +63,76 @@ def test_quadrature_weights(elem):
     )
 
 
-@pytest.mark.parametrize("elem", [Bar1, Bar2, Tria1, Tria2, Quad1, Quad2])
-def test_plot(elem):
-    with tempfile.TemporaryDirectory() as tmpdir:
-        path = Path(tmpdir)
-        elem.plot(path=path)
-        result = path / f"{elem.__name__}_shape_functions.png"
-        assert result.exists()
-    plt.close("all")
+def _bar_mesh():
+    nodes = torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
+    elements = torch.tensor([[0, 1], [1, 2]])
+    return nodes, elements
+
+
+# One case per supported topology, with the expected quadratic node count.
+LINEAR_MESHES = [
+    pytest.param(_bar_mesh(), 3, id="bar"),
+    pytest.param(rect_tri(3, 3), 6, id="tria"),
+    pytest.param(rect_quad(3, 3), 8, id="quad"),
+    pytest.param(cube_tetra(2, 2, 2), 10, id="tetra"),
+    pytest.param(cube_hexa(2, 2, 2), 20, id="hexa"),
+]
+
+
+class TestEdges:
+    @pytest.mark.parametrize("etype", ELEMENT_REGISTRY, ids=lambda e: e.__name__)
+    def test_midside_nodes_sit_between_their_corners(self, etype):
+        """A quadratic edge carries the node at the midpoint of its two corners."""
+        xi = etype.iso_coords
+        assert etype.edges.max() < etype.nodes
+        for edge in etype.edges.tolist():
+            if len(edge) == 3:
+                a, b, mid = edge
+                assert torch.allclose(xi[mid], 0.5 * (xi[a] + xi[b]))
+
+    @pytest.mark.parametrize("etype", ELEMENT_REGISTRY, ids=lambda e: e.__name__)
+    def test_every_corner_is_covered(self, etype):
+        n_corner = etype.nodes - sum(len(e) == 3 for e in etype.edges.tolist())
+        assert set(etype.edges[:, :2].flatten().tolist()) == set(range(n_corner))
+
+
+class TestLinearToQuadratic:
+    @pytest.mark.parametrize("mesh, n_quad_nodes", LINEAR_MESHES)
+    def test_extends_connectivity_and_keeps_corner_nodes(self, mesh, n_quad_nodes):
+        nodes, elements = mesh
+        new_nodes, new_elements = linear_to_quadratic(nodes, elements)
+        n_lin = elements.shape[1]
+        assert new_elements.shape == (elements.shape[0], n_quad_nodes)
+        assert torch.equal(new_elements[:, :n_lin], elements)
+        assert torch.allclose(new_nodes[: nodes.shape[0]], nodes)
+
+    @pytest.mark.parametrize("mesh, n_quad_nodes", LINEAR_MESHES)
+    def test_adds_one_node_per_unique_edge(self, mesh, n_quad_nodes):
+        """Elements sharing an edge must reference the same midside node."""
+        nodes, elements = mesh
+        new_nodes, new_elements = linear_to_quadratic(nodes, elements)
+        n_lin = elements.shape[1]
+        midside = new_elements[:, n_lin:]
+        assert new_nodes.shape[0] - nodes.shape[0] == len(midside.unique())
+        assert new_nodes.unique(dim=0).shape[0] == new_nodes.shape[0]
+        # Within an element, every edge gets its own midside node.
+        for elem in midside:
+            assert len(elem.unique()) == n_quad_nodes - n_lin
+
+    @pytest.mark.parametrize("mesh, n_quad_nodes", LINEAR_MESHES)
+    def test_new_nodes_sit_at_edge_midpoints(self, mesh, n_quad_nodes):
+        nodes, elements = mesh
+        new_nodes, new_elements = linear_to_quadratic(nodes, elements)
+        n_lin = elements.shape[1]
+        i, j = torch.triu_indices(n_lin, n_lin, offset=1)
+        for elem in new_elements:
+            corners = new_nodes[elem[:n_lin]]
+            midpoints = 0.5 * (corners[i] + corners[j])
+            for node in new_nodes[elem[n_lin:]]:
+                assert torch.isclose(midpoints, node, atol=1e-10).all(dim=-1).any()
+
+    def test_rejects_unsupported_topology(self):
+        nodes, elements = rect_quad(3, 3)
+        new_nodes, new_elements = linear_to_quadratic(nodes, elements)
+        with pytest.raises(ValueError, match="not supported"):
+            linear_to_quadratic(new_nodes, new_elements)

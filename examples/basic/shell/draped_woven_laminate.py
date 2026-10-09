@@ -106,9 +106,12 @@ def study_properties(out: Path, ply: BiaxialPly) -> None:
     g = g_deg.numpy()
     ax[0].plot(g, c["E_x"] / 1e3, color=C1, lw=2)
     ax[0].plot(g, c["E_y"] / 1e3, color=C2, lw=2)
-    ax[0].text(g[-1], c["E_x"][-1] / 1e3, " E_x (bisector)", color=INK, va="center",
-               fontsize=9)
-    ax[0].text(g[-1], c["E_y"][-1] / 1e3 + 1.5, " E_y", color=INK, va="bottom", fontsize=9)
+    ax[0].text(
+        g[-1], c["E_x"][-1] / 1e3, " E_x (bisector)", color=INK, va="center", fontsize=9
+    )
+    ax[0].text(
+        g[-1], c["E_y"][-1] / 1e3 + 1.5, " E_y", color=INK, va="bottom", fontsize=9
+    )
     ax[0].set_ylabel("Young's modulus [GPa]")
     ax[0].set_title("Moduli in the bisector frame", color=INK, loc="left")
     ax[1].plot(g, c["G_xy"] / 1e3, color=C1, lw=2)
@@ -121,8 +124,12 @@ def study_properties(out: Path, ply: BiaxialPly) -> None:
         a.set_xlabel("Shear angle γ [deg]")
         a.set_xlim(0, 72)
         _style(a)
-    fig.suptitle("Cured glass/PP plain weave (Aridhi model): effect of the forming shear",
-                 color=INK, x=0.01, ha="left")
+    fig.suptitle(
+        "Cured glass/PP plain weave (Aridhi model): effect of the forming shear",
+        color=INK,
+        x=0.01,
+        ha="left",
+    )
     fig.tight_layout()
     fig.savefig(out / "1a_properties_vs_shear.png", dpi=150)
     plt.close(fig)
@@ -135,8 +142,9 @@ def study_properties(out: Path, ply: BiaxialPly) -> None:
     ax = fig.add_subplot(projection="polar")
     for k, (gd, col) in enumerate(zip(gammas, (C1, C2, C3))):
         ax.plot(phi, E[k], color=col, lw=2, label=f"γ = {gd:.0f}°")
-    ax.set_title("Tension modulus E(φ) [GPa]\nφ from the yarn bisector", color=INK,
-                 fontsize=10)
+    ax.set_title(
+        "Tension modulus E(φ) [GPa]\nφ from the yarn bisector", color=INK, fontsize=10
+    )
     ax.legend(frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.06), ncol=3)
     ax.tick_params(colors=MUTED)
     ax.set_rlabel_position(100)
@@ -151,24 +159,43 @@ def study_properties(out: Path, ply: BiaxialPly) -> None:
 def study_bias_forming(out: Path) -> dict:
     """Forming step: bias-extension test with the non-linear G12(gamma) law."""
     W, L, d = 70.0, 210.0, 50.0
-    r = bias_extension_forming(W, L, d, E_yarn=35400.0, G12_coeffs=G12_GLASS_PP,
-                               thickness=1.2, n_w=14, n_inc=50)
+    r = bias_extension_forming(
+        W,
+        L,
+        d,
+        E_yarn=35400.0,
+        G12_coeffs=G12_GLASS_PP,
+        thickness=1.2,
+        n_w=14,
+        n_inc=50,
+    )
     cen = r["nodes"][r["elements"]].mean(1)
     core = ((cen[:, 1] - L / 2).abs() < 15) & ((cen[:, 0] - W / 2).abs() < 8)
     g_fe = torch.rad2deg(r["gamma"][:, core].median(dim=1).values)
     dd = r["d"]
-    g_an = torch.tensor([math.degrees(bias_extension_shear(W, L, x)) for x in dd.tolist()])
-    print(f"  {len(r['elements'])} yarn-aligned Quad1, max yarn strain "
-          f"{(r['stretch'] - 1).abs().max():.1e}")
+    g_an = torch.tensor(
+        [math.degrees(bias_extension_shear(W, L, x)) for x in dd.tolist()]
+    )
+    print(
+        f"  {len(r['elements'])} yarn-aligned Quad1, max yarn strain "
+        f"{(r['stretch'] - 1).abs().max():.1e}"
+    )
     for k in range(0, len(dd), 10):
-        print(f"  d = {dd[k]:4.1f} mm   gamma_A FE = {g_fe[k]:5.1f} deg   Eq.21 = "
-              f"{g_an[k]:5.1f} deg   force = {r['force'][k]:7.2f} N")
+        print(
+            f"  d = {dd[k]:4.1f} mm   gamma_A FE = {g_fe[k]:5.1f} deg   Eq.21 = "
+            f"{g_an[k]:5.1f} deg   force = {r['force'][k]:7.2f} N"
+        )
 
-    fig, ax = plt.subplots(1, 4, figsize=(16, 4.4),
-                           gridspec_kw={"width_ratios": [1, 1, 1, 0.55]})
+    fig, ax = plt.subplots(
+        1, 4, figsize=(16, 4.4), gridspec_kw={"width_ratios": [1, 1, 1, 0.55]}
+    )
     gg = torch.linspace(0, 1.05, 100)
-    ax[0].plot(torch.rad2deg(gg), shear_modulus(gg), color=C1, lw=2, label="G₁₂(γ), tangent")
-    ax[0].plot(torch.rad2deg(gg), shear_stress(gg), color=C2, lw=2, label="τ(γ) = ∫G₁₂ dγ")
+    ax[0].plot(
+        torch.rad2deg(gg), shear_modulus(gg), color=C1, lw=2, label="G₁₂(γ), tangent"
+    )
+    ax[0].plot(
+        torch.rad2deg(gg), shear_stress(gg), color=C2, lw=2, label="τ(γ) = ∫G₁₂ dγ"
+    )
     ax[0].set_xlabel("Shear angle γ [deg]")
     ax[0].set_ylabel("MPa")
     ax[0].set_title("Paper Eq. 22 (glass/PP)", color=INK, loc="left")
@@ -189,8 +216,14 @@ def study_bias_forming(out: Path) -> dict:
     q = r["elements"]
     tri = torch.cat([q[:, [0, 1, 2]], q[:, [0, 2, 3]]]).numpy()
     gl = torch.rad2deg(r["gamma"][-1].abs())
-    tp = ax[3].tripcolor(x[:, 0], x[:, 1], tri, facecolors=torch.cat([gl, gl]).numpy(),
-                         cmap="Blues", edgecolors="none")
+    tp = ax[3].tripcolor(
+        x[:, 0],
+        x[:, 1],
+        tri,
+        facecolors=torch.cat([gl, gl]).numpy(),
+        cmap="Blues",
+        edgecolors="none",
+    )
     ax[3].set_aspect("equal")
     ax[3].set_xticks([])
     ax[3].set_yticks([])
@@ -214,7 +247,9 @@ def _cured_tension(nodes, elements, plies, bottom, top, du=1.0, tmode="none"):
     return f[top, 1].sum().item() / du
 
 
-def study_bias_extension(out: Path, ply: BiaxialPly, forming: dict | None = None) -> None:
+def study_bias_extension(
+    out: Path, ply: BiaxialPly, forming: dict | None = None
+) -> None:
     """Tension of the cured specimen after the bias-extension test."""
     W, L, d = 70.0, 210.0, 50.0
     r2 = 1 / math.sqrt(2)
@@ -229,16 +264,23 @@ def study_bias_extension(out: Path, ply: BiaxialPly, forming: dict | None = None
     z = torch.zeros(n_elem, 1)
     th1 = direction_angles(nodes, elements, torch.hstack([kin_e["f1"], z]))
     th2 = direction_angles(nodes, elements, torch.hstack([kin_e["f2"], z]))
-    n1 = direction_angles(nodes, elements, torch.tensor([r2, r2, 0.0]).expand(n_elem, 3))
-    n2 = direction_angles(nodes, elements, torch.tensor([-r2, r2, 0.0]).expand(n_elem, 3))
+    n1 = direction_angles(
+        nodes, elements, torch.tensor([r2, r2, 0.0]).expand(n_elem, 3)
+    )
+    n2 = direction_angles(
+        nodes, elements, torch.tensor([-r2, r2, 0.0]).expand(n_elem, 3)
+    )
     bottom = X[:, 1] < 1e-9
     top = X[:, 1] > L - 1e-9
     K["with reorientation (Eq. 21 zones)"] = _cured_tension(
-        nodes, elements, [DrapedPly(ply, th1, th2)], bottom, top)
+        nodes, elements, [DrapedPly(ply, th1, th2)], bottom, top
+    )
     K["without (orthogonal ±45°)"] = _cured_tension(
-        nodes, elements, [DrapedPly(ply, n1, n2)], bottom, top)
-    k_areal = _cured_tension(nodes, elements, [DrapedPly(ply, th1, th2)], bottom, top,
-                             tmode="areal")
+        nodes, elements, [DrapedPly(ply, n1, n2)], bottom, top
+    )
+    k_areal = _cured_tension(
+        nodes, elements, [DrapedPly(ply, th1, th2)], bottom, top, tmode="areal"
+    )
 
     # (b) Yarn field and geometry predicted by the forming simulation
     if forming is not None:
@@ -252,29 +294,52 @@ def study_bias_extension(out: Path, ply: BiaxialPly, forming: dict | None = None
         a1 = direction_angles(fn, tri, torch.hstack([f1, zf]))
         a2 = direction_angles(fn, tri, torch.hstack([f2, zf]))
         K["with reorientation (G₁₂(γ) forming FE)"] = _cured_tension(
-            fn, tri, [DrapedPly(ply, a1, a2)], forming["bottom"], forming["top"])
+            fn, tri, [DrapedPly(ply, a1, a2)], forming["bottom"], forming["top"]
+        )
 
     for name, k in K.items():
         print(f"  {name:40s} K = {k / 1e3:6.3f} kN/mm")
     print(f"  {'with reorientation + t0/cos γ':40s} K = {k_areal / 1e3:6.3f} kN/mm")
     keys = list(K)
-    print(f"  stiffness ratio with/without = {K[keys[0]] / K[keys[1]]:.1f} "
-          "(paper Fig. 10: ~2.4 / ~0.5 kN/mm, experiment ~2.6 kN/mm)")
+    print(
+        f"  stiffness ratio with/without = {K[keys[0]] / K[keys[1]]:.1f} "
+        "(paper Fig. 10: ~2.4 / ~0.5 kN/mm, experiment ~2.6 kN/mm)"
+    )
 
-    fig, ax = plt.subplots(1, 2, figsize=(11, 5), gridspec_kw={"width_ratios": [1, 1.6]})
+    fig, ax = plt.subplots(
+        1, 2, figsize=(11, 5), gridspec_kw={"width_ratios": [1, 1.6]}
+    )
     x = nodes[:, :2].numpy()
-    tp = ax[0].tripcolor(x[:, 0], x[:, 1], elements.numpy(),
-                         facecolors=torch.rad2deg(kin_e["gamma"]).numpy(),
-                         cmap="Blues", edgecolors="none")
+    tp = ax[0].tripcolor(
+        x[:, 0],
+        x[:, 1],
+        elements.numpy(),
+        facecolors=torch.rad2deg(kin_e["gamma"]).numpy(),
+        cmap="Blues",
+        edgecolors="none",
+    )
     sel = torch.arange(0, n_elem, 151)
     c = nodes[elements[sel]].mean(1)
     for f, col in ((kin_e["f1"], C2), (kin_e["f2"], C3)):
-        ax[0].quiver(c[:, 0], c[:, 1], f[sel, 0], f[sel, 1], color=col, angles="xy",
-                     scale_units="xy", scale=0.12, width=0.008, headwidth=0,
-                     headlength=0, headaxislength=0, pivot="middle")
+        ax[0].quiver(
+            c[:, 0],
+            c[:, 1],
+            f[sel, 0],
+            f[sel, 1],
+            color=col,
+            angles="xy",
+            scale_units="xy",
+            scale=0.12,
+            width=0.008,
+            headwidth=0,
+            headlength=0,
+            headaxislength=0,
+            pivot="middle",
+        )
     ax[0].set_aspect("equal")
-    ax[0].set_title("Cured bias specimen, γ [deg]\nwarp / weft directions",
-                    color=INK, loc="left")
+    ax[0].set_title(
+        "Cured bias specimen, γ [deg]\nwarp / weft directions", color=INK, loc="left"
+    )
     ax[0].set_xticks([])
     ax[0].set_yticks([])
     fig.colorbar(tp, ax=ax[0], shrink=0.7)
@@ -284,12 +349,22 @@ def study_bias_extension(out: Path, ply: BiaxialPly, forming: dict | None = None
     for name, col, ls in zip(order, (C1, C3, C2), ("-", (0, (4, 3)), "-")):
         ax[1].plot(u, K[name] * u / 1e3, color=col, lw=2, ls=ls, label=name)
     ax[1].plot([0, 1.5], [0, 4.0], ls="--", color=MUTED, lw=1.2)
-    ax[1].text(1.55, 4.0, "paper exp., linear part (~2.6 kN/mm)", color=MUTED,
-               fontsize=8, va="center")
+    ax[1].text(
+        1.55,
+        4.0,
+        "paper exp., linear part (~2.6 kN/mm)",
+        color=MUTED,
+        fontsize=8,
+        va="center",
+    )
     ax[1].set_xlabel("Displacement [mm]")
     ax[1].set_ylabel("Load [kN]")
-    ax[1].set_title(f"Tension of the cured specimen (glass/PA66 assumed, t = {ply.t} mm)",
-                    color=INK, loc="left", fontsize=10)
+    ax[1].set_title(
+        f"Tension of the cured specimen (glass/PA66 assumed, t = {ply.t} mm)",
+        color=INK,
+        loc="left",
+        fontsize=10,
+    )
     ax[1].legend(frameon=False)
     _style(ax[1])
     fig.tight_layout()
@@ -307,13 +382,15 @@ def run_kindrape(kindrape_dir: Path, ang: float, d: float, grid: int) -> np.ndar
     kd = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(kd)
     org = [grid // 2 - 1, grid // 2 - 1]
-    node, _, _, _ = kd.KinDrape_eff_NR(d, [grid, grid], [0.0, 0.0], ang, org, 0.0,
-                                       False, "hemisphere")
+    node, _, _, _ = kd.KinDrape_eff_NR(
+        d, [grid, grid], [0.0, 0.0], ang, org, 0.0, False, "hemisphere"
+    )
     return node
 
 
-def plot_field(ax, fig, nodes, elements, values, title, cmap="Blues", label="",
-               vlim=None):
+def plot_field(
+    ax, fig, nodes, elements, values, title, cmap="Blues", label="", vlim=None
+):
     x = nodes.numpy()
     v = values.numpy()
     pc = Poly3DCollection(x[elements.numpy()], cmap=cmap, edgecolor="none")
@@ -339,16 +416,23 @@ def study_dome(out: Path, grids, angles, ply: BiaxialPly, scale: float, u2: floa
     for k, g in enumerate(grids):
         src = ref if k == 0 else grid_to_shell_mesh(torch.as_tensor(g) * scale)
         src_cen = src["nodes"][src["elements"]].mean(1)
-        th1 = direction_angles(nodes, elements, map_directions(src_cen, src["warp"], cen))
-        th2 = direction_angles(nodes, elements, map_directions(src_cen, src["weft"], cen))
+        th1 = direction_angles(
+            nodes, elements, map_directions(src_cen, src["warp"], cen)
+        )
+        th2 = direction_angles(
+            nodes, elements, map_directions(src_cen, src["weft"], cen)
+        )
         draped.append(DrapedPly(ply, th1, th2))
         a = math.radians(angles[k])
-        n1, n2 = nominal_directions(nodes, elements,
-                                    torch.tensor([math.cos(a), math.sin(a), 0.0]))
+        n1, n2 = nominal_directions(
+            nodes, elements, torch.tensor([math.cos(a), math.sin(a), 0.0])
+        )
         nominal.append(DrapedPly(ply, n1, n2))
         gd = torch.rad2deg(draped[-1].gamma.abs())
-        print(f"  ply {k} ({angles[k]:g} deg): |gamma| mean {gd.mean():.1f} deg, "
-              f"max {gd.max():.1f} deg")
+        print(
+            f"  ply {k} ({angles[k]:g} deg): |gamma| mean {gd.mean():.1f} deg, "
+            f"max {gd.max():.1f} deg"
+        )
 
     # Paper Fig. 15: lower boundary clamped, displacement in direction 2 on the
     # opposite boundary (grid rows j = 0 and j = max of the draped patch).
@@ -357,7 +441,10 @@ def study_dome(out: Path, grids, angles, ply: BiaxialPly, scale: float, u2: floa
     frames = element_frames(nodes, elements)[:, :2, :]  # rows e1, e2
 
     res = {}
-    for name, plies in (("without reorientation", nominal), ("with reorientation", draped)):
+    for name, plies in (
+        ("without reorientation", nominal),
+        ("with reorientation", draped),
+    ):
         lam, info = build_draped_laminate(plies)
         m = Shell(nodes, elements, lam)
         m.constraints[clamped] = True
@@ -372,22 +459,42 @@ def study_dome(out: Path, grids, angles, ply: BiaxialPly, scale: float, u2: floa
         ys = yarn_stresses(m, sigma, info)
         s_L = torch.stack([s["s11"] for s in ys]).amax((0, 1))
         res[name] = {"F2": F2, "s22": s_glob[:, 1, 1]}
-        print(f"  {name:24s} reaction F2 = {F2 / 1e3:7.3f} kN   "
-              f"max σ22 (top) = {s_glob[:, 1, 1].max():7.1f} MPa   "
-              f"max yarn-layer σ_L = {s_L.max():7.1f} MPa")
+        print(
+            f"  {name:24s} reaction F2 = {F2 / 1e3:7.3f} kN   "
+            f"max σ22 (top) = {s_glob[:, 1, 1].max():7.1f} MPa   "
+            f"max yarn-layer σ_L = {s_L.max():7.1f} MPa"
+        )
     k0, k1 = list(res)
-    print(f"  force ratio with/without = {res[k1]['F2'] / res[k0]['F2']:.2f} "
-          "(paper Fig. 17: force lower with reorientation)")
+    print(
+        f"  force ratio with/without = {res[k1]['F2'] / res[k0]['F2']:.2f} "
+        "(paper Fig. 17: force lower with reorientation)"
+    )
 
     fig = plt.figure(figsize=(14, 4.6))
     ax = fig.add_subplot(1, 3, 1, projection="3d")
-    plot_field(ax, fig, nodes, elements, torch.rad2deg(draped[0].gamma.abs()),
-               "Shear angle |γ| (KinDrape)", label="deg")
+    plot_field(
+        ax,
+        fig,
+        nodes,
+        elements,
+        torch.rad2deg(draped[0].gamma.abs()),
+        "Shear angle |γ| (KinDrape)",
+        label="deg",
+    )
     vmax = max(res[k]["s22"].abs().max().item() for k in res)
     for i, k in enumerate((k0, k1)):
         ax = fig.add_subplot(1, 3, 2 + i, projection="3d")
-        plot_field(ax, fig, nodes, elements, res[k]["s22"], f"σ₂₂ top, {k}",
-                   cmap="PuOr", label="MPa", vlim=(-vmax, vmax))
+        plot_field(
+            ax,
+            fig,
+            nodes,
+            elements,
+            res[k]["s22"],
+            f"σ₂₂ top, {k}",
+            cmap="PuOr",
+            label="MPa",
+            vlim=(-vmax, vmax),
+        )
     fig.tight_layout()
     fig.savefig(out / "3_dome_inplane_loading.png", dpi=150)
     plt.close(fig)
@@ -395,7 +502,9 @@ def study_dome(out: Path, grids, angles, ply: BiaxialPly, scale: float, u2: floa
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("--drapes", nargs="*", default=[], help="KinDrape .npz files (bottom->top)")
+    p.add_argument(
+        "--drapes", nargs="*", default=[], help="KinDrape .npz files (bottom->top)"
+    )
     p.add_argument("--kindrape", type=Path, help="KinDrapeApp folder (runs KinDrape)")
     p.add_argument("--angles", nargs="*", type=float, default=[0.0])
     p.add_argument("--d", type=float, default=0.075, help="KinDrape cell size (R = 1)")
@@ -427,7 +536,9 @@ def main(argv=None):
             grids.append(cache[ang])
             angles.append(ang)
     if grids:
-        print("[3] Draped hemisphere, in-plane loading of the cured part (paper Sec. 5.2)")
+        print(
+            "[3] Draped hemisphere, in-plane loading of the cured part (paper Sec. 5.2)"
+        )
         study_dome(a.out, grids, angles, GLASS_PP, a.scale, a.u2)
     else:
         print("[3] skipped (pass --drapes or --kindrape)")

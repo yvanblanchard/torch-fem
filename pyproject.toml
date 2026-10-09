@@ -4,12 +4,23 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torch-fem"
-version = "0.6.3"
+version = "0.13.0"
 authors = [{ name = "Nils Meyer", email = "nils.meyer@uni-a.de" }]
 description = "GPU accelerated differentiable finite elements for solid mechanics with PyTorch."
 readme = "README.md"
 license = {file = "LICENSE"}
-keywords = ["finite elements", "automatic differentiation"]
+keywords = [
+    "finite elements",
+    "automatic differentiation",
+    "scientific computing",
+    "differentiable programming",
+    "solid mechanics",
+    "differentiable physics",
+    "sensitivity analysis",
+    "topology optimization",
+    "shape optimization",
+    "inverse problems",
+]
 requires-python = ">=3.10"
 classifiers = [
     'Programming Language :: Python',
@@ -18,21 +29,45 @@ classifiers = [
     'Programming Language :: Python :: 3.11',
     'Programming Language :: Python :: 3.12',
     'Programming Language :: Python :: 3.13',
+    'Programming Language :: Python :: 3.14',
 ]
 dependencies = [
-    "ipywidgets",
-    "ipykernel",
     "matplotlib",
     "meshio",
+    "numpy",
     "pyamg",
     "pyvista",
-    "scipy~=1.15.0",
-    "tqdm",
-    "torch",
-    "trame",
-    "trame-vuetify",
-    "trame-vtk",
+    "scipy>=1.14",
+    "torch>=2.0",
+]
+
+[project.optional-dependencies]
+notebook = [
     "imageio",
+    "ipykernel",
+    "ipywidgets",
+    "pygmsh",
+    "pyvista[jupyter]",
+    "tqdm",
+    "trame-client!=3.13.3",
+]
+dev = [
+    "basedpyright",
+    "pytest",
+    "pytest-cov",
+    "ruff",
+    "testbook",
+]
+docs = [
+    "mkdocs",
+    "mkdocstrings-python",
+    "psutil",
+    "zensical",
+]
+all = [
+    "torch-fem[notebook]",
+    "torch-fem[dev]",
+    "torch-fem[docs]",
 ]
 
 [project.urls]
@@ -46,3 +81,45 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 torchfem = ["data/*.*"]
+
+[tool.ruff]
+line-length = 88
+exclude = [".binder", ".cache", "build", "dist", "site", "*.md"]
+
+[tool.ruff.lint]
+# E, W: pycodestyle, F: pyflakes, I: isort, B: bugbear, UP: pyupgrade, C4: comprehensions
+select = ["E", "W", "F", "I", "B", "UP", "C4"]
+# E203 conflicts with the formatter, B905 asks for an explicit strict= on every zip.
+ignore = ["E203", "B905"]
+
+[tool.ruff.lint.per-file-ignores]
+# I, J, K are the conventional names for meshgrid index arrays.
+"src/torchfem/mesh.py" = ["E741"]
+# Notebooks import after code and redefine names in later cells, and their
+# optimization loops close over loop variables.
+"*.ipynb" = ["E402", "F811", "B023", "B007"]
+
+[tool.pyright]
+pythonVersion = "3.10"
+include = ["src/torchfem", "tests", "benchmarks", "docs"]
+typeCheckingMode = "basic"
+reportMissingImports = false
+
+[tool.pytest.ini_options]
+markers = [
+    "notebook: executes an example notebook (slow)",
+]
+filterwarnings = [
+    "ignore:Sparse CSR tensor support is in beta",
+]
+
+[tool.coverage.run]
+source = ["torchfem"]
+omit = ["*/amgx.py"]
+
+[tool.coverage.report]
+# Abstract stubs and the optional GPU/Pardiso backends cannot run in CI.
+exclude_also = [
+    "raise NotImplementedError",
+    "except ImportError:",
+]

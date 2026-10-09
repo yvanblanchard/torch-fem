@@ -1,22 +1,13 @@
-import argparse
-import time
-
 import torch
+from utils import Case, Problem, run_case
 
 from torchfem import Solid
-from torchfem.elements import linear_to_quadratic
 from torchfem.materials import IsotropicElasticity3D
 from torchfem.mesh import cube_hexa
 
-torch.set_default_dtype(torch.float64)
 
-
-def get_cube(N, order=1):
+def get_cube(N):
     nodes, elements = cube_hexa(N, N, N)
-    if order == 2:
-        nodes, elements = linear_to_quadratic(nodes, elements)
-    elif order > 2:
-        raise ValueError("Only linear and quadratic elements are supported.")
 
     # Material model
     material = IsotropicElasticity3D(E=1000.0, nu=0.3)
@@ -33,30 +24,30 @@ def get_cube(N, order=1):
     return cube
 
 
+def setup(N, method=None, preconditioner=None):
+    cube = get_cube(N)
+    result = {}
+
+    def forward():
+        result["u"], *_ = cube.solve(
+            differentiable_parameters=cube.forces,
+            method=method,
+            preconditioner=preconditioner,
+        )
+
+    def backward():
+        result["u"].sum().backward()
+
+    return Case(dofs=3 * cube.n_nod, forward=forward, backward=backward)
+
+
+PROBLEM = Problem(
+    id="cube_hexa_extension",
+    title="Cube extension benchmark",
+    plot_prefix="cube",
+    default_N=[20, 30, 40, 50, 60, 70, 80],
+    setup=setup,
+)
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Solve the cube problem.")
-    parser.add_argument("-N", type=int, help="The value of N", default=10)
-    parser.add_argument("-device", type=str, help="Troch default device", default="cpu")
-    parser.add_argument("-order", type=int, help="The order of the element", default=1)
-    args = parser.parse_args()
-
-    torch.set_default_device(args.device)
-
-    # Reset peak memory stats before computation
-    if args.device == "cuda":
-        torch.cuda.reset_peak_memory_stats()
-
-    # Start timing
-    print(f"START:{time.time()}")
-
-    # Setup
-    box = get_cube(args.N, args.order)
-    print(f"SETUP_DONE:{time.time()}")
-
-    # Forward pass
-    u, f, sigma, epsilon, state = box.solve(differentiable_parameters=box.forces)
-    print(f"FWD_DONE:{time.time()}")
-
-    # Backward pass
-    u.sum().backward()
-    print(f"BWD_DONE:{time.time()}")
+    run_case(PROBLEM)

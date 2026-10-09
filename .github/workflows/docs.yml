@@ -34,15 +34,25 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install jupyter nbconvert nest_asyncio2
-          python -m pip install .
+          python -m pip install ".[notebook,docs]"
 
-      - run: pip install zensical mkdocs mkdocstrings-python       
+      - name: Generate documentation plots
+        run: |
+          python benchmarks/plot.py
+          python docs/images/shape_functions/plot_elements.py
+          python docs/images/mesh/plot_meshes.py
+          python docs/images/laminate/plot_laminates.py
+
       - run: zensical build --clean
 
       - name: Convert planar notebooks to HTML
         run: |
           jupyter nbconvert --to HTML --execute --output-dir site/examples/basic/planar/ examples/basic/planar/*.ipynb
           jupyter nbconvert --to HTML --output-dir site/examples/optimization/planar/ examples/optimization/planar/*.ipynb
+
+      - name: Convert axisymmetric notebooks to HTML
+        run: |
+          jupyter nbconvert --to HTML --output-dir site/examples/basic/axisymmetric/ examples/basic/axisymmetric/*.ipynb
 
       - name: Convert truss notebooks to HTML
         env:
@@ -58,6 +68,14 @@ jobs:
         run: |
           echo "DISPLAY variable: $DISPLAY"
           jupyter nbconvert --to HTML --execute --output-dir site/examples/basic/shell/ examples/basic/shell/*.ipynb
+          jupyter nbconvert --to HTML --output-dir site/examples/optimization/shell/ examples/optimization/shell/*.ipynb
+
+      - name: Convert assembly notebooks to HTML
+        env:
+          DISPLAY: ":99"
+        run: |
+          echo "DISPLAY variable: $DISPLAY"
+          jupyter nbconvert --to HTML --execute --output-dir site/examples/basic/assembly/ examples/basic/assembly/*.ipynb
 
       - name: Convert solid notebooks to HTML
         env:
@@ -65,6 +83,7 @@ jobs:
         run: |
           echo "DISPLAY variable: $DISPLAY"
           jupyter nbconvert --to HTML --execute --output-dir site/examples/basic/solid/ examples/basic/solid/*.ipynb
+          jupyter nbconvert --to HTML --output-dir site/examples/optimization/solid/ examples/optimization/solid/*.ipynb
       - uses: actions/upload-pages-artifact@v4
         with:
           path: site

@@ -4,23 +4,30 @@ from functools import cached_property
 import pyvista
 import torch
 from pyvista import DataSet
+from pyvista.plotting import CameraPositionOptions
 from torch import Tensor
 
-from .base import Heat, Mechanics
+from .base import FEM, Heat, Mechanics
 from .elements import Element, Hexa1, Hexa2, Tetra1, Tetra2
-from .materials import Material
+from .plot_utils import arrows, cones, dots, new_plotter, show_plotter
 
 
-class Solid(Mechanics):
+class SolidGeometry(FEM):
+    """The elements, integration and plotting shared by the solid models.
+
+    It carries the discretization of a three-dimensional continuum, which
+    `Solid` and `SolidHeat` combine with the physics they solve.
+
+    Attributes:
+        nodes: Nodal coordinates with shape [n_nod, 3].
+        elements: Element connectivity with shape [n_elem, nodes_per_element].
+        material: Vectorized material model.
+        constraints: Boolean mask of constrained DOFs with shape [n_nod, n_dof].
+    """
 
     def __repr__(self) -> str:
-        etype = self.etype.__class__.__name__
+        etype = self.etype.__name__
         return f"<torch-fem solid ({self.n_nod} nodes, {self.n_elem} {etype} elements)>"
-
-    @property
-    def n_flux(self) -> list[int]:
-        """Shape of the stress tensor."""
-        return [3, 3]
 
     @property
     def etype(self) -> type[Element]:
@@ -44,7 +51,7 @@ class Solid(Mechanics):
 
     def compute_k(self, detJ: Tensor, BCB: Tensor) -> Tensor:
         """Element stiffness matrix contribution."""
-        return torch.einsum("j,jkl->jkl", detJ, BCB)
+        return BCB.mul_(detJ[:, None, None])
 
     def compute_f(self, detJ: Tensor, B: Tensor, S: Tensor) -> Tensor:
         """Element internal force vector."""
@@ -58,14 +65,17 @@ class Solid(Mechanics):
     def plot(
         self,
         u: float | Tensor = 0.0,
-        node_property: dict[str, Tensor] | None = None,
-        element_property: dict[str, Tensor] | None = None,
+        node_property: Tensor | dict[str, Tensor] | None = None,
+        element_property: Tensor | dict[str, Tensor] | None = None,
         orientations: Tensor | None = None,
         show_edges: bool = True,
         show_undeformed: bool = False,
-        contour: tuple[str, list[float]] | None = None,
+        show_outline: bool = False,
+        axes: bool = False,
+        bcs: bool = False,
+        clip: tuple[str, float] | None = None,
         plotter: pyvista.Plotter | None = None,
-        threshold_condition: torch.Tensor | None = None,
+        camera: CameraPositionOptions | None = None,
         **kwargs,
     ):
         """Plot the mesh with optional node and element properties.
@@ -73,29 +83,40 @@ class Solid(Mechanics):
         Args:
             u (float or torch.Tensor, optional):
                 Displacement field. Defaults to 0.0.
-            node_property (dict[str, torch.Tensor], optional):
-                Nodal property to plot. Defaults to None.
-            element_property (dict[str, torch.Tensor], optional):
-                Element property to plot. Defaults to None.
+            node_property (torch.Tensor or dict[str, torch.Tensor], optional):
+                Nodal property to plot, optionally keyed by its color bar title.
+                Defaults to None.
+            element_property (torch.Tensor or dict[str, torch.Tensor], optional):
+                Element property to plot, keyed like `node_property`. Defaults
+                to None.
             orientations (torch.Tensor, optional):
-                Element orientations. Defaults to None.
+                Element orientations with shape [n_elem, k, 3] with k <= 3,
+                drawn as red, green, and blue arrows. Defaults to None.
             show_edges (bool, optional):
                 Show edges. Defaults to True.
             show_undeformed (bool, optional):
                 Show undeformed mesh. Defaults to False.
-            contour (tuple[str, list[float]], optional):
-                Contour plot. Defaults to None.
+            show_outline (bool, optional):
+                Show a box around the full mesh. Defaults to False.
+            axes (bool, optional):
+                Show labeled coordinate axes around the mesh. Defaults to False.
+            bcs (bool, optional):
+                If True, render boundary conditions (forces as arrows,
+                prescribed displacements as arrows and tip markers,
+                and constrained DOFs as cones). Defaults to False.
+            clip (tuple[str, float], optional):
+                Property and value to cut the mesh at. Culls orientations and
+                boundary conditions with it. Defaults to None.
             plotter (pyvista.Plotter, optional):
                 PyVista plotter. Defaults to None.
-            threshold_condition (torch.Tensor, optional):
-                Threshold condition to recover subshape. Defaults to None.
+            camera (str or list, optional):
+                Camera position, either a plane ("xy", "xz", "yz"), "iso", or an
+                explicit position, focal point and view up. Defaults to None.
             **kwargs:
                 Additional keyword arguments passed to pyvista.Plotter.add_mesh.
         """
 
-        pyvista.set_plot_theme("document")
-        pl = pyvista.Plotter() if plotter is None else plotter
-        pl.enable_anti_aliasing("ssaa")
+        pl = new_plotter(plotter)
 
         # VTK cell types
         if self.etype is Tetra1:
@@ -117,6 +138,12 @@ class Solid(Mechanics):
         # Create unstructured mesh
         mesh = pyvista.UnstructuredGrid(elements, cell_types, pos.tolist())
 
+        # A bare field is titled by its argument, a named one by its key
+        if isinstance(node_property, Tensor):
+            node_property = {"node_property": node_property}
+        if isinstance(element_property, Tensor):
+            element_property = {"element_property": element_property}
+
         # Plot node properties
         if node_property:
             for key, val in node_property.items():
@@ -127,63 +154,114 @@ class Solid(Mechanics):
             for key, val in element_property.items():
                 mesh.cell_data[key] = val.cpu().numpy()
 
-        if threshold_condition is None:
-            threshold_condition = torch.ones(self.n_elem, dtype=torch.bool)
+        if show_outline:
+            pl.add_mesh(mesh.outline(), color="black")
 
-        # Apply threshold to recover subshape
-        mesh = mesh.extract_cells(threshold_condition.cpu().numpy())
+        # Averaging onto the nodes makes the field continuous, so the cut runs
+        # through the elements instead of around them.
+        kept = torch.ones(self.n_elem, dtype=torch.bool)
+        if clip:
+            scalars, value = clip
+            # Surviving elements, to cull orientations and BCs
+            if element_property and scalars in element_property:
+                kept = element_property[scalars] > value
+            elif node_property and scalars in node_property:
+                kept = (node_property[scalars][self.elements] > value).any(dim=1)
+            mesh = mesh.cell_data_to_point_data()
+            mesh = mesh.clip_scalar(scalars=scalars, value=value, invert=False)
 
         # Plot orientations
         if orientations is not None:
             ecenters = pos[self.elements].mean(dim=1)
-            for j, color in enumerate(["red", "green", "blue"]):
+            for j, color in zip(range(orientations.shape[1]), ["red", "green", "blue"]):
                 directions = orientations[:, j, :]
                 pl.add_arrows(
-                    ecenters.cpu().numpy()[threshold_condition],
-                    directions.cpu().numpy()[threshold_condition],
+                    ecenters.cpu().numpy()[kept],
+                    directions.cpu().numpy()[kept],
                     mag=1,
                     color=color,
                     show_scalar_bar=False,
                 )
 
         # Plot mesh
-        if contour:
-            scalars, values = contour
-            pl.add_mesh(mesh.outline(), color="black")
-            pl.add_mesh(mesh.contour(values, scalars=scalars), **kwargs)
-        else:
-            mesh = typing.cast(DataSet, mesh)
-            if show_edges:
-                if self.etype is Tetra2 or self.etype is Hexa2:
-                    # Trick to plot edges for quadratic elements
-                    # See: https://github.com/pyvista/pyvista/discussions/5777
-                    surface = mesh.separate_cells().extract_surface(
-                        nonlinear_subdivision=4
-                    )
-                    edges = surface.extract_feature_edges()
-                    pl.add_mesh(surface, **kwargs)
-                    actor = pl.add_mesh(edges, style="wireframe", color="black")
-                    actor.mapper.SetResolveCoincidentTopologyToPolygonOffset()
-                else:
-                    pl.add_mesh(mesh, show_edges=True, **kwargs)
+        mesh = typing.cast(DataSet, mesh)
+        if show_edges:
+            if self.etype is Tetra2 or self.etype is Hexa2:
+                # Trick to plot edges for quadratic elements
+                # See: https://github.com/pyvista/pyvista/discussions/5777
+                surface = mesh.separate_cells().extract_surface(
+                    nonlinear_subdivision=4, algorithm=None
+                )
+                edges = surface.extract_feature_edges()
+                pl.add_mesh(surface, **kwargs)
+                actor = pl.add_mesh(edges, style="wireframe", color="black")
+                actor.mapper.SetResolveCoincidentTopologyToPolygonOffset()
             else:
-                pl.add_mesh(mesh, **kwargs)
+                pl.add_mesh(mesh, show_edges=True, **kwargs)
+        else:
+            pl.add_mesh(mesh, **kwargs)
 
         if show_undeformed:
             undefo = pyvista.UnstructuredGrid(elements, cell_types, self.nodes.tolist())
             edges = (
                 undefo.separate_cells()
-                .extract_surface(nonlinear_subdivision=4)
+                .extract_surface(nonlinear_subdivision=4, algorithm=None)
                 .extract_feature_edges()
             )
             pl.add_mesh(edges, style="wireframe", color="grey")
 
-        if plotter is None:
-            pl.show(jupyter_backend="html")
+        if bcs and self.n_dof_per_node != 1:
+            # Nodes of culled elements carry no visible boundary conditions
+            visible = torch.zeros(self.n_nod, dtype=torch.bool)
+            visible[self.elements[kept].reshape(-1)] = True
+            deformed = isinstance(u, Tensor)
+            prescribed = torch.where(self.constraints, self._dirichlet, 0.0)
+            size = torch.linalg.norm(pos.max(dim=0).values - pos.min(dim=0).values)
+            height = 0.5 * float(self.char_lengths.mean())
+
+            # Forces scaled linearly, prescribed displacements to scale and only
+            # where the nodes do not sit at them already
+            fixed = self.constraints & visible[:, None]
+            arrows(pl, pos[visible], self._neumann[visible], span=0.1 * float(size))
+            if not deformed:
+                fixed = fixed & (prescribed == 0.0)
+                arrows(pl, pos[visible], prescribed[visible])
+            pulled = (torch.linalg.norm(prescribed, dim=1) > 0.0) & visible
+            dots(pl, (pos if deformed else pos + prescribed)[pulled], 0.3 * height)
+            cones(pl, pos, fixed, height)
+
+        show_plotter(pl, plotter, axes, camera)
 
 
-class SolidHeat(Heat, Solid):
+class Solid(SolidGeometry, Mechanics):
+    """Solid mechanics model for three-dimensional continua.
 
-    def __init__(self, nodes: Tensor, elements: Tensor, material: Material):
-        super().__init__(nodes, elements, material)
-        self._external_gradient = torch.zeros(self.n_elem, *self.n_flux)
+    Attributes:
+        nodes: Nodal coordinates with shape [n_nod, 3].
+        elements: Element connectivity with shape [n_elem, nodes_per_element].
+        material: Vectorized material model.
+        forces: Applied nodal forces with shape [n_nod, 3].
+        displacements: Prescribed nodal displacements with shape [n_nod, 3].
+        constraints: Boolean mask of constrained DOFs with shape [n_nod, 3].
+    """
+
+    @property
+    def n_flux(self) -> list[int]:
+        """Shape of the stress tensor."""
+        return [3, 3]
+
+
+class SolidHeat(SolidGeometry, Heat):
+    """Solid heat conduction model.
+
+    Uses the same elements and plotting as `Solid`, but with a single
+    temperature degree of freedom per node.
+
+    Attributes:
+        nodes: Nodal coordinates with shape [n_nod, 3].
+        elements: Element connectivity with shape [n_elem, nodes_per_element].
+        material: Vectorized thermal material model.
+        heat_flux: Applied nodal heat sources with shape [n_nod, 1].
+        temperatures: Prescribed nodal temperatures with shape [n_nod, 1].
+        constraints: Boolean mask of constrained DOFs with shape [n_nod, 1].
+    """
