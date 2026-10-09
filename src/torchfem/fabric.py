@@ -718,6 +718,17 @@ def shear_energy(gamma: Tensor, coeffs=G12_GLASS_PP) -> Tensor:
     )
 
 
+def _cross2(a: Tensor, b: Tensor) -> Tensor:
+    return a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0]
+
+
+def _shear_angle(a1: Tensor, a2: Tensor, f01: Tensor, f02: Tensor) -> Tensor:
+    """Signed ``gamma = pi/2 - angle(a1, a2)``, keeping the handedness of the
+    initial yarn pair ``(f01, f02)`` and differentiable up to yarn locking."""
+    hand = torch.sign(_cross2(f01, f02))
+    return torch.atan2((a1 * a2).sum(-1), hand * _cross2(a1, a2))
+
+
 def _forming_psi(F: Tensor, p: Tensor) -> Tensor:
     """Energy of the woven membrane, ``p = [E1, E2, f01(2), f02(2), a0..a4]``."""
     E1, E2 = p[0], p[1]
@@ -725,7 +736,7 @@ def _forming_psi(F: Tensor, p: Tensor) -> Tensor:
     a2 = F @ p[4:6]
     l1 = torch.linalg.norm(a1)
     l2 = torch.linalg.norm(a2)
-    gamma = torch.asin(torch.clamp(a1 @ a2 / (l1 * l2), -0.999999, 0.999999))
+    gamma = _shear_angle(a1, a2, p[2:4], p[4:6])
     # gamma^2 |gamma|^k (not |gamma|^(k+2)) keeps Phi''(0) = a_0 under autograd
     g2, g = gamma * gamma, gamma.abs()
     phi = 0.5 * p[6] * g2 + sum(
@@ -795,7 +806,7 @@ class WovenFormingMembrane(Hyperelastic3D):
         a2 = torch.einsum("...ij,...j->...i", F, params[..., 4:6])
         l1, l2 = a1.norm(dim=-1), a2.norm(dim=-1)
         f1, f2 = a1 / l1[..., None], a2 / l2[..., None]
-        gamma = torch.asin(torch.clamp((f1 * f2).sum(-1), -1.0, 1.0))
+        gamma = _shear_angle(a1, a2, params[..., 2:4], params[..., 4:6])
         return {"f1": f1, "f2": f2, "stretch_1": l1, "stretch_2": l2, "gamma": gamma}
 
 

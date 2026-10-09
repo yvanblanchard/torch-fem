@@ -506,7 +506,9 @@ def main(argv=None):
         "--drapes", nargs="*", default=[], help="KinDrape .npz files (bottom->top)"
     )
     p.add_argument("--kindrape", type=Path, help="KinDrapeApp folder (runs KinDrape)")
-    p.add_argument("--angles", nargs="*", type=float, default=[0.0])
+    p.add_argument(
+        "--angles", nargs="*", type=float, default=[0.0], help="ply angles [deg]"
+    )
     p.add_argument("--d", type=float, default=0.075, help="KinDrape cell size (R = 1)")
     p.add_argument("--grid", type=int, default=24)
     p.add_argument("--scale", type=float, default=78.0, help="hemisphere radius [mm]")
@@ -523,10 +525,9 @@ def main(argv=None):
     study_bias_extension(a.out, GLASS_PA66, forming)
 
     grids, angles = [], []
-    for f in a.drapes:
-        data = np.load(f, allow_pickle=True)
-        grids.append(data["nodes"])
-        angles.append(float(data["parameters"].item().get("ang", 0.0)))
+    for k, f in enumerate(a.drapes):
+        grids.append(np.load(f)["nodes"])
+        angles.append(a.angles[min(k, len(a.angles) - 1)])
     if not grids and a.kindrape is not None:
         cache = {}
         for ang in a.angles:
