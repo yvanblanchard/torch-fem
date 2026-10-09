@@ -41,6 +41,8 @@ layup = Laminate.from_plies(
 )
 ```
 
+`Shell.ply_results(sigma, ply_id)` averages a field from `solve(..., aggregate_integration_points=False)` over one ply, and returns NaN where the ply is absent.
+
 Layer materials may also be vectorized with one entry per element, to vary the properties of a layer over the mesh.
 
 ::: torchfem.Ply

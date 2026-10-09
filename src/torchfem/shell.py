@@ -565,6 +565,26 @@ class Shell(ShellGeometry, Mechanics):
         )
         return self.thickness[:, None, None] * Cs
 
+    def ply_results(self, field: Tensor, ply_id: int) -> Tensor:
+        """Average a station field over the thickness and integration points of a ply.
+
+        Args:
+            field: Field from `solve(..., aggregate_integration_points=False)` with
+                shape [n_int, n_elem, ...], e.g. the stress.
+            ply_id: Global identifier of the ply in the laminate section.
+
+        Returns:
+            Field with shape [n_elem, ...], NaN on elements the ply does not cover.
+        """
+        assert self.section is not None
+        k = self.section.ply_ids.index(ply_id)
+        stations = slice(k * self.n_simpson, (k + 1) * self.n_simpson)
+        field = field.reshape(-1, self.n_z, *field.shape[1:])[:, stations]
+        w = self.section.w[stations].reshape(
+            1, self.n_simpson, -1, *[1] * (field.dim() - 3)
+        )
+        return ((w * field).sum(dim=1) / w.sum(dim=1)).mean(dim=0)
+
     def _thickness_stations(self) -> tuple[list[MechanicsMaterial], Tensor, Tensor]:
         """Through-thickness integration stations.
 

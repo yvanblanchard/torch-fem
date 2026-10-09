@@ -488,3 +488,25 @@ def test_layers_with_per_element_materials():
     k = shell.k0()
     assert torch.allclose(k[0], ref_stiff.k0()[0])
     assert torch.allclose(k[1], ref_soft.k0()[1])
+
+
+def test_ply_results_under_uniform_stretch():
+    """Each ply carries its own stiffness times the strain, NaN where absent."""
+    nodes, elements = square_plate()
+    mat = _cfrp()
+    plies = [
+        Ply(5, mat, 0.25, 0.0),
+        Ply(6, mat, 0.25, torch.pi / 2, elements=torch.tensor([True, False])),
+        Ply(7, mat, 0.25, 0.0),
+    ]
+    plate = Shell(nodes, elements, Laminate.from_plies(plies))
+    plate.constraints[:] = True
+    plate.displacements[:, 0] = 0.01 * nodes[:, 0]
+    _, _, sigma, _, _ = plate.solve(aggregate_integration_points=False)
+
+    nu2 = 0.3**2 * 10000.0 / 135000.0
+    s0 = plate.ply_results(sigma, 5)[:, 0, 0]
+    s90 = plate.ply_results(sigma, 6)[:, 0, 0]
+    assert torch.allclose(s0, torch.full((2,), 0.01 * 135000.0 / (1 - nu2)))
+    assert torch.isclose(s90[0], torch.tensor(0.01 * 10000.0 / (1 - nu2)))
+    assert torch.isnan(s90[1])
