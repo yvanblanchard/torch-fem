@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from torchfem import Laminate, Shell
+from torchfem import Laminate, Ply, Shell
 from torchfem.materials import (
     IsotropicConductivity2D,
     IsotropicElasticity3D,
@@ -291,6 +291,16 @@ def test_laminate_is_section_not_material():
     assert homogeneous.material is not None
 
 
+def test_homogeneous_shell_ply_results_requires_laminate_section():
+    shell = Shell(
+        *square_plate(),
+        IsotropicElasticityPlaneStress(E=70000.0, nu=0.3),
+        thickness=1.0,
+    )
+    with pytest.raises(ValueError, match="requires a laminate section"):
+        shell.ply_results(torch.empty(1), 0)
+
+
 def _gfrp():
     return OrthotropicElasticityPlaneStress(
         E_1=40000.0, E_2=10000.0, nu_12=0.3, G_12=5000.0, G_13=5000.0, G_23=4000.0
@@ -405,3 +415,117 @@ def test_laminate_rejects_an_incompatible_layer(material):
     """A shell hands its laminate to `Shell.section`, past the check in `FEM`."""
     with pytest.raises(ValueError, match="must be a 2D mechanics material"):
         Laminate([material], [1.0], [0.0])
+
+
+def _cfrp(E_1: float | torch.Tensor = 135000.0):
+    return OrthotropicElasticityPlaneStress(
+        E_1=E_1, E_2=10000.0, nu_12=0.3, G_12=5000.0, G_13=5000.0, G_23=3800.0
+    )
+
+
+def test_ply_ids_default_to_layer_index_and_must_be_unique():
+    mat = _cfrp()
+    assert Laminate([mat, mat], [1.0, 1.0], [0.0, 0.0]).ply_ids == [0, 1]
+    lam = Laminate([mat], [1.0], [0.0], symmetric=True, ply_ids=[7, 8])
+    assert lam.ply_ids == [7, 8]
+    with pytest.raises(ValueError, match="unique"):
+        Laminate([mat, mat], [1.0, 1.0], [0.0, 0.0], ply_ids=[3, 3])
+    with pytest.raises(ValueError, match="one identifier per layer"):
+        Laminate([mat], [1.0], [0.0], symmetric=True, ply_ids=[3])
+
+
+def test_global_plies_match_layers():
+    nodes, elements = square_plate()
+    mat = _cfrp()
+    plies = [Ply(10, mat, 0.25, 0.0), Ply(20, mat, 0.25, torch.pi / 2)]
+    lam = Laminate([mat, mat], [0.25, 0.25], [0.0, torch.pi / 2])
+
+    shell = Shell(nodes, elements, Laminate.from_plies(plies))
+    assert shell.section is not None and shell.section.ply_ids == [10, 20]
+    assert torch.allclose(
+        cantilever_tip_displacement(shell),
+        cantilever_tip_displacement(Shell(nodes, elements, lam)),
+        atol=1e-12,
+    )
+
+
+def test_local_ply_only_stiffens_its_element_set():
+    """Elements outside a ply's set behave as the laminate without that ply."""
+    nodes, elements = square_plate()
+    mat = _cfrp()
+    in_set = torch.tensor([True, False])
+    plies = [
+        Ply(1, mat, 0.25, 0.0),
+        Ply(2, mat, 0.25, torch.pi / 4, elements=in_set),
+        Ply(3, mat, 0.25, torch.pi / 2),
+    ]
+    local = Shell(nodes, elements, Laminate.from_plies(plies))
+    covered = [plies[0], Ply(2, mat, 0.25, torch.pi / 4), plies[2]]
+    full = Shell(nodes, elements, Laminate.from_plies(covered))
+    without = Shell(nodes, elements, Laminate.from_plies([plies[0], plies[2]]))
+
+    assert torch.allclose(local.thickness, torch.tensor([0.75, 0.5]))
+    for k_local, k_ref in (
+        (local.k0(), full.k0()),
+        (local.integrate_mass(), full.integrate_mass()),
+    ):
+        assert torch.allclose(k_local[0], k_ref[0])
+    for k_local, k_ref in (
+        (local.k0(), without.k0()),
+        (local.integrate_mass(), without.integrate_mass()),
+    ):
+        assert torch.allclose(k_local[1], k_ref[1])
+
+
+def test_local_ply_laminate_cannot_be_plotted():
+    mat = _cfrp()
+    layup = Laminate.from_plies(
+        [Ply(1, mat, 0.25, elements=torch.tensor([True, False]))]
+    )
+    with pytest.raises(ValueError, match="element-wise laminates cannot be plotted"):
+        layup.plot()
+
+
+def test_an_element_without_plies_is_rejected():
+    nodes, elements = square_plate()
+    plies = [Ply(1, _cfrp(), 0.25, elements=torch.tensor([True, False]))]
+    with pytest.raises(ValueError, match="covered by a ply"):
+        Shell(nodes, elements, Laminate.from_plies(plies))
+
+
+def test_layers_with_per_element_materials():
+    """Pre-vectorized layer materials assign properties per element."""
+    nodes, elements = square_plate()
+    soft, stiff = _cfrp(70000.0), _cfrp()
+    mixed = _cfrp(torch.tensor([135000.0, 70000.0]))
+    angles = [0.0, torch.pi / 2]
+
+    shell = Shell(nodes, elements, Laminate([mixed, mixed], [0.25, 0.25], angles))
+    ref_stiff = Shell(nodes, elements, Laminate([stiff, stiff], [0.25, 0.25], angles))
+    ref_soft = Shell(nodes, elements, Laminate([soft, soft], [0.25, 0.25], angles))
+
+    k = shell.k0()
+    assert torch.allclose(k[0], ref_stiff.k0()[0])
+    assert torch.allclose(k[1], ref_soft.k0()[1])
+
+
+def test_ply_results_under_uniform_stretch():
+    """Each ply carries its own stiffness times the strain, NaN where absent."""
+    nodes, elements = square_plate()
+    mat = _cfrp()
+    plies = [
+        Ply(5, mat, 0.25, 0.0),
+        Ply(6, mat, 0.25, torch.pi / 2, elements=torch.tensor([True, False])),
+        Ply(7, mat, 0.25, 0.0),
+    ]
+    plate = Shell(nodes, elements, Laminate.from_plies(plies))
+    plate.constraints[:] = True
+    plate.displacements[:, 0] = 0.01 * nodes[:, 0]
+    _, _, sigma, _, _ = plate.solve(aggregate_integration_points=False)
+
+    nu2 = 0.3**2 * 10000.0 / 135000.0
+    s0 = plate.ply_results(sigma, 5)[:, 0, 0]
+    s90 = plate.ply_results(sigma, 6)[:, 0, 0]
+    assert torch.allclose(s0, torch.full((2,), 0.01 * 135000.0 / (1 - nu2)))
+    assert torch.isclose(s90[0], torch.tensor(0.01 * 10000.0 / (1 - nu2)))
+    assert torch.isnan(s90[1])
