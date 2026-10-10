@@ -289,10 +289,19 @@ class Laminate:
 
         Each ply is drawn as a band through the thickness (height proportional
         to the ply thickness) with the ply angle annotated.
+        Only laminates with scalar thicknesses and angles can be plotted.
 
         Args:
             ax: Existing matplotlib axes to plot into.
         """
+        if any(t.dim() != 0 for t in self.thicknesses) or any(
+            angle.dim() != 0 for angle in self.angles
+        ):
+            raise ValueError(
+                "Laminate.plot() requires scalar thicknesses and angles; "
+                "element-wise laminates cannot be plotted."
+            )
+
         import matplotlib.pyplot as plt
         from matplotlib.patches import Rectangle
 

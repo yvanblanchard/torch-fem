@@ -291,6 +291,16 @@ def test_laminate_is_section_not_material():
     assert homogeneous.material is not None
 
 
+def test_homogeneous_shell_ply_results_requires_laminate_section():
+    shell = Shell(
+        *square_plate(),
+        IsotropicElasticityPlaneStress(E=70000.0, nu=0.3),
+        thickness=1.0,
+    )
+    with pytest.raises(ValueError, match="requires a laminate section"):
+        shell.ply_results(torch.empty(1), 0)
+
+
 def _gfrp():
     return OrthotropicElasticityPlaneStress(
         E_1=40000.0, E_2=10000.0, nu_12=0.3, G_12=5000.0, G_13=5000.0, G_23=4000.0
@@ -465,6 +475,15 @@ def test_local_ply_only_stiffens_its_element_set():
         (local.integrate_mass(), without.integrate_mass()),
     ):
         assert torch.allclose(k_local[1], k_ref[1])
+
+
+def test_local_ply_laminate_cannot_be_plotted():
+    mat = _cfrp()
+    layup = Laminate.from_plies(
+        [Ply(1, mat, 0.25, elements=torch.tensor([True, False]))]
+    )
+    with pytest.raises(ValueError, match="element-wise laminates cannot be plotted"):
+        layup.plot()
 
 
 def test_an_element_without_plies_is_rejected():

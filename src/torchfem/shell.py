@@ -576,7 +576,8 @@ class Shell(ShellGeometry, Mechanics):
         Returns:
             Field with shape [n_elem, ...], NaN on elements the ply does not cover.
         """
-        assert self.section is not None
+        if self.section is None:
+            raise ValueError("ply_results requires a laminate section.")
         k = self.section.ply_ids.index(ply_id)
         stations = slice(k * self.n_simpson, (k + 1) * self.n_simpson)
         field = field.reshape(-1, self.n_z, *field.shape[1:])[:, stations]
