@@ -10,6 +10,7 @@
             - __init__
             - solve
             - integrate_surface_load
+            - ply_results
             - plot
             - solve_modes
 

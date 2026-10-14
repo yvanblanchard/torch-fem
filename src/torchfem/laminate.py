@@ -15,12 +15,33 @@ reference surface within that stack through its `offset`.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import torch
 from torch import Tensor
 
 from .materials import MechanicsMaterial
 from .rotations import planar_rotation
+
+
+@dataclass
+class Ply:
+    """A ply with a global identifier, laid on a set of elements.
+
+    Args:
+        id: Global ply identifier.
+        material: Plane-stress mechanics material of the ply.
+        thickness: Ply thickness, a scalar or a tensor of shape `(n_elem,)`.
+        angle: Ply angle in radians, a scalar or a tensor of shape `(n_elem,)`.
+        elements: Boolean mask of shape `(n_elem,)` selecting the elements the
+            ply covers. `None` covers all elements.
+    """
+
+    id: int
+    material: MechanicsMaterial
+    thickness: float | Tensor
+    angle: float | Tensor = 0.0
+    elements: Tensor | None = None
 
 
 class Laminate:
@@ -37,6 +58,8 @@ class Laminate:
             the thickness. Must be an odd integer (default `3`).
         symmetric: If `True`, the given layers are the half-stack (outer surface
             to mid-plane) and are mirrored to form the full laminate.
+        ply_ids: Unique global ply identifier of each layer of the full stack.
+            Defaults to the layer index.
 
     Notes:
         - Layers may carry internal state (e.g. an elastoplastic metal ply); the
@@ -46,6 +69,8 @@ class Laminate:
           `n_state`), so it can be passed straight to `Shell`.
         - The stack is centered on its mid-plane. `Shell(offset=...)` moves the
           reference surface, adding the membrane-bending coupling it implies.
+        - A layer with zero thickness on an element is absent there, which is
+          how `from_plies` lays a ply on a set of elements.
     """
 
     @property
@@ -61,10 +86,11 @@ class Laminate:
     def __init__(
         self,
         materials: Sequence[MechanicsMaterial],
-        thicknesses: Sequence[float] | Sequence[Tensor] | Tensor,
-        angles: Sequence[float] | Sequence[Tensor] | Tensor,
+        thicknesses: Sequence[float | Tensor] | Tensor,
+        angles: Sequence[float | Tensor] | Tensor,
         n_simpson: int = 3,
         symmetric: bool = False,
+        ply_ids: Sequence[int] | None = None,
     ):
         if not (len(materials) == len(thicknesses) == len(angles)):
             raise ValueError(
@@ -97,11 +123,17 @@ class Laminate:
         self.n_layers = len(self.materials)
         self.n_simpson = n_simpson
 
+        self.ply_ids = list(range(self.n_layers)) if ply_ids is None else list(ply_ids)
+        if len(self.ply_ids) != self.n_layers:
+            raise ValueError("ply_ids must give one identifier per layer.")
+        if len(set(self.ply_ids)) != self.n_layers:
+            raise ValueError("ply_ids must be unique.")
+
         # Number of through-thickness integration stations
         self.n_z = self.n_layers * n_simpson
 
-        # The laminate is considered vectorized once all layer materials are.
-        self.is_vectorized = all(m.is_vectorized for m in self.materials)
+        # Only `vectorize` builds the stations of a laminate.
+        self.is_vectorized = False
 
         # State width is the per-layer maximum; each layer's `step` touches only
         # the slots it needs, so mixing elastic and state-bearing layers is free.
@@ -111,6 +143,26 @@ class Laminate:
         return (
             f"<torch-fem laminate ({self.n_layers} layers, "
             f"{self.n_z} integration points)>"
+        )
+
+    @classmethod
+    def from_plies(cls, plies: Sequence[Ply], n_simpson: int = 3) -> Laminate:
+        """Build a laminate from plies given from the bottom surface upwards.
+
+        Each ply is one layer, with zero thickness outside its element set.
+        """
+        thicknesses = [
+            torch.as_tensor(p.thickness, dtype=torch.get_default_dtype())
+            if p.elements is None
+            else torch.where(p.elements, torch.as_tensor(p.thickness), 0.0)
+            for p in plies
+        ]
+        return cls(
+            materials=[p.material for p in plies],
+            thicknesses=thicknesses,
+            angles=[p.angle for p in plies],
+            n_simpson=n_simpson,
+            ply_ids=[p.id for p in plies],
         )
 
     def vectorize(self, n_elem: int, offset: Tensor) -> Laminate:
@@ -129,6 +181,7 @@ class Laminate:
         new.n_z = self.n_z
         new.n_state = self.n_state
         new.angles = self.angles
+        new.ply_ids = self.ply_ids
         new.is_vectorized = True
 
         new.materials = []
@@ -148,6 +201,8 @@ class Laminate:
         # Per-layer thickness [n_layers, n_elem]
         t = torch.stack(self.thicknesses, dim=0)
         self.thickness = t.sum(dim=0)
+        if torch.any(self.thickness <= 0.0):
+            raise ValueError("Every element must be covered by a ply.")
 
         # Interface coordinates from the reference surface (z = 0); the offset
         # shifts the stack so the reference sits at the requested fraction.
@@ -234,10 +289,19 @@ class Laminate:
 
         Each ply is drawn as a band through the thickness (height proportional
         to the ply thickness) with the ply angle annotated.
+        Only laminates with scalar thicknesses and angles can be plotted.
 
         Args:
             ax: Existing matplotlib axes to plot into.
         """
+        if any(t.dim() != 0 for t in self.thicknesses) or any(
+            angle.dim() != 0 for angle in self.angles
+        ):
+            raise ValueError(
+                "Laminate.plot() requires scalar thicknesses and angles; "
+                "element-wise laminates cannot be plotted."
+            )
+
         import matplotlib.pyplot as plt
         from matplotlib.patches import Rectangle
 
