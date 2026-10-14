@@ -4,9 +4,11 @@
 
 ### Added
 - `torchfem.fabric` models sheared woven plies after forming (Aridhi et al. 2019) as two UD yarn layers in a `Laminate`, with the forming membrane `WovenFormingMembrane` and its shear-angle dependent modulus `G_12(gamma)`.
+- `Ply` defines a ply with a global identifier on a boolean element set, and `Laminate.from_plies(...)` stacks plies into a laminate with local plies. `Laminate.ply_ids` holds the ply identifier of each layer.
+- `Shell.ply_results(field, ply_id)` averages a field from the integration points over one ply, with NaN where the ply is absent.
 
 ### Fixed
-- A `Laminate` whose layers already carry element-wise properties builds its stations instead of being taken as vectorized.
+- A `Laminate` whose layer materials are all vectorized, e.g. with properties per element, builds its stations instead of failing in `Shell`.
 
 ## Version 0.13.0 - September 30 2026
 
